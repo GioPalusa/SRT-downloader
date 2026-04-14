@@ -9,20 +9,24 @@ The tool scans a folder tree, finds video files, searches online subtitle provid
 ## Quick Start
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-python3 fetch_srt_subtitles.py
+sudo curl -L https://github.com/GioPalusa/SRT-downloader/releases/latest/download/srt-download -o /usr/local/bin/srt-download
+sudo chmod +x /usr/local/bin/srt-download
 ```
 
-That command scans the current folder and subfolders, tries English subtitles first, and writes files like:
+That command downloads the latest version of the `srt-download` tool and makes it globally accessible. You can now run:
+
+```bash
+srt-download
+```
+
+This scans the current folder and subfolders, tries English subtitles first, and writes files like:
 
 - `Movie.mkv` -> `Movie.en.srt`
 
 ## Command Synopsis
 
 ```bash
-python3 fetch_srt_subtitles.py [path] [options]
+python3 srt-download.py [path] [options]
 ```
 
 Common options:
@@ -41,7 +45,7 @@ Common options:
 Run full help:
 
 ```bash
-python3 fetch_srt_subtitles.py --help
+python3 srt-download.py --help
 ```
 
 ## Getting Started
@@ -49,25 +53,25 @@ python3 fetch_srt_subtitles.py --help
 ### 1. Scan current folder
 
 ```bash
-python3 fetch_srt_subtitles.py
+python3 srt-download.py
 ```
 
 ### 2. Choose a primary language (with English fallback)
 
 ```bash
-python3 fetch_srt_subtitles.py --language sv
+python3 srt-download.py --language sv
 ```
 
 ### 3. Scan a specific folder
 
 ```bash
-python3 fetch_srt_subtitles.py "/path/to/videos"
+python3 srt-download.py "/path/to/videos"
 ```
 
 ### 4. See detailed provider-by-provider progress
 
 ```bash
-python3 fetch_srt_subtitles.py --detailed-progress
+python3 srt-download.py --detailed-progress
 ```
 
 ## Practical Usage Examples
@@ -75,7 +79,7 @@ python3 fetch_srt_subtitles.py --detailed-progress
 ### Prioritize one provider, still keep fallback providers
 
 ```bash
-python3 fetch_srt_subtitles.py -p opensubtitlescom
+python3 srt-download.py -p opensubtitlescom
 ```
 
 Behavior:
@@ -87,31 +91,31 @@ Behavior:
 ### Use only selected providers (strict mode)
 
 ```bash
-python3 fetch_srt_subtitles.py -p opensubtitlescom -p podnapisi --only-selected-providers
+python3 srt-download.py -p opensubtitlescom -p podnapisi --only-selected-providers
 ```
 
 ### Use a custom config file
 
 ```bash
-python3 fetch_srt_subtitles.py --config /path/to/srt-fetcher.json
+python3 srt-download.py --config /path/to/srt-fetcher.json
 ```
 
 ### Show provider setup before scanning
 
 ```bash
-python3 fetch_srt_subtitles.py --list-providers
+python3 srt-download.py --list-providers
 ```
 
 ### Show effective runtime config (merged CLI + config file)
 
 ```bash
-python3 fetch_srt_subtitles.py --print-effective-config
+python3 srt-download.py --print-effective-config
 ```
 
 ### Print version
 
 ```bash
-python3 fetch_srt_subtitles.py --version
+python3 srt-download.py --version
 ```
 
 ### Disable config behavior for one run
@@ -119,24 +123,24 @@ python3 fetch_srt_subtitles.py --version
 Any CLI option overrides config values. For example:
 
 ```bash
-python3 fetch_srt_subtitles.py --config ./srt-fetcher.json --language en --no-detailed-progress
+python3 srt-download.py --config ./srt-fetcher.json --language en --no-detailed-progress
 ```
 
 ### Run from anywhere with a global command
 
 ```bash
 mkdir -p ~/.local/bin
-cat > ~/.local/bin/fetch-srt <<'EOF'
+cat > ~/.local/bin/srt-download <<'EOF'
 #!/usr/bin/env zsh
 "/Users/palusa/Developer/STL fetcher/.venv/bin/python" "/Users/palusa/Developer/STL fetcher/fetch_srt_subtitles.py" "$@"
 EOF
-chmod +x ~/.local/bin/fetch-srt
+chmod +x ~/.local/bin/srt-download
 ```
 
 Then use it from any folder:
 
 ```bash
-fetch-srt . --language sv
+srt-download . --language sv
 ```
 
 ## Config File
@@ -231,3 +235,26 @@ Example recent line:
 ### Stop safely
 
 Press `Ctrl+C` at any time. The tool exits cleanly and prints a partial summary.
+
+### Adding a Provider to the Setup File
+
+You can specify additional subtitle providers and their credentials in the setup file. Create a `srt-downloader.yaml` file in the same directory as the script or use the provided `srt-downloader.yaml.example` as a template.
+
+#### Example Setup File
+```yaml
+language:
+  - en
+  - sv
+providers:
+  opensubtitlescom:
+    username: your_username
+    password: your_password
+  addic7ed:
+    username: your_username
+    password: your_password
+detailed_progress: false
+verbose: false
+```
+
+- Replace `your_username` and `your_password` with your actual credentials.
+- The `language` field can accept a list of languages to download multiple subtitles per title.
