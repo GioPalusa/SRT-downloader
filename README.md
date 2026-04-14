@@ -1,176 +1,101 @@
 # SRT Downloader
 
-<img width="846" height="429" alt="Skärmavbild 2026-04-14 kl  21 38 18" src="https://github.com/user-attachments/assets/fbca22f4-deef-4ea5-949a-cb8de8f690bf" />
+<img width="846" height="429" alt="Screenshot" src="https://github.com/user-attachments/assets/fbca22f4-deef-4ea5-949a-cb8de8f690bf" />
 
 Download subtitles for local video files, recursively.
 
-The tool scans a folder tree, finds video files, searches online subtitle providers, and saves subtitles next to each video.
+The tool scans a folder tree, finds video files, searches subtitle providers, and saves subtitles next to each video.
 
-## Quick Start
+## Install
+
+### macOS
 
 ```bash
-sudo curl -L https://github.com/GioPalusa/SRT-downloader/releases/latest/download/srt-download -o /usr/local/bin/srt-download
-sudo chmod +x /usr/local/bin/srt-download
+curl -fsSL https://raw.githubusercontent.com/GioPalusa/SRT-downloader/main/install.sh | sh
 ```
 
-That command downloads the latest version of the `srt-download` tool and makes it globally accessible. You can now run:
+The installer downloads the latest GitHub release binary for your Mac, installs it as `srt-download`, and adds the install directory to your `PATH` when needed.
+
+### Windows
+
+```powershell
+irm https://raw.githubusercontent.com/GioPalusa/SRT-downloader/main/install.ps1 | iex
+```
+
+The installer downloads the latest GitHub release binary, installs `srt-download.exe`, and adds it to your user `PATH`.
+
+### Python Install Alternative
+
+```bash
+pipx install git+https://github.com/GioPalusa/SRT-downloader.git
+```
+
+That gives you the same `srt-download` command through Python instead of a standalone binary.
+
+## Usage
+
+```bash
+srt-download [path] [options]
+```
+
+Examples:
 
 ```bash
 srt-download
+srt-download --language sv
+srt-download "/path/to/videos"
+srt-download -p opensubtitlescom
+srt-download --detailed-progress
 ```
 
-This scans the current folder and subfolders, tries English subtitles first, and writes files like:
+Useful options:
 
-- `Movie.mkv` -> `Movie.en.srt`
-
-## Command Synopsis
-
-```bash
-python3 srt-download.py [path] [options]
-```
-
-Common options:
-
-- `-l, --language sv` Primary language (falls back to English if not found)
-- `-p, --provider NAME` Prioritize one or more providers (repeat flag)
-- `--only-selected-providers` Do not use public fallback providers
-- `--config /path/to/srt-fetcher.json` Load settings from JSON config
-- `--detailed-progress` Show per-provider progress (slower)
-- `--verbose` Debug logging
-- `--encoding utf-8` Subtitle file encoding
-- `--list-providers` Show exactly which providers will be used
-- `--print-effective-config` Show merged runtime config and exit
-- `--version` Print version and exit
+- `-l, --language sv` Set the primary language. English is added automatically as fallback.
+- `-p, --provider NAME` Prioritize one or more providers. Repeat the flag to set order.
+- `--only-selected-providers` Disable public fallback providers.
+- `--config /path/to/srt-downloader.yaml` Load settings from a YAML config file.
+- `--list-providers` Print the final provider order and exit.
+- `--print-effective-config` Print merged runtime settings and exit.
+- `--verbose` Enable debug logging.
+- `--version` Print the current version.
 
 Run full help:
 
 ```bash
-python3 srt-download.py --help
-```
-
-## Getting Started
-
-### 1. Scan current folder
-
-```bash
-python3 srt-download.py
-```
-
-### 2. Choose a primary language (with English fallback)
-
-```bash
-python3 srt-download.py --language sv
-```
-
-### 3. Scan a specific folder
-
-```bash
-python3 srt-download.py "/path/to/videos"
-```
-
-### 4. See detailed provider-by-provider progress
-
-```bash
-python3 srt-download.py --detailed-progress
-```
-
-## Practical Usage Examples
-
-### Prioritize one provider, still keep fallback providers
-
-```bash
-python3 srt-download.py -p opensubtitlescom
-```
-
-Behavior:
-
-- Your selected providers are tried first.
-- Public providers are still used as fallback.
-- Credential-based providers are auto-added when credentials are exported.
-
-### Use only selected providers (strict mode)
-
-```bash
-python3 srt-download.py -p opensubtitlescom -p podnapisi --only-selected-providers
-```
-
-### Use a custom config file
-
-```bash
-python3 srt-download.py --config /path/to/srt-fetcher.json
-```
-
-### Show provider setup before scanning
-
-```bash
-python3 srt-download.py --list-providers
-```
-
-### Show effective runtime config (merged CLI + config file)
-
-```bash
-python3 srt-download.py --print-effective-config
-```
-
-### Print version
-
-```bash
-python3 srt-download.py --version
-```
-
-### Disable config behavior for one run
-
-Any CLI option overrides config values. For example:
-
-```bash
-python3 srt-download.py --config ./srt-fetcher.json --language en --no-detailed-progress
-```
-
-### Run from anywhere with a global command
-
-```bash
-mkdir -p ~/.local/bin
-cat > ~/.local/bin/srt-download <<'EOF'
-#!/usr/bin/env zsh
-"/Users/palusa/Developer/STL fetcher/.venv/bin/python" "/Users/palusa/Developer/STL fetcher/fetch_srt_subtitles.py" "$@"
-EOF
-chmod +x ~/.local/bin/srt-download
-```
-
-Then use it from any folder:
-
-```bash
-srt-download . --language sv
+srt-download --help
 ```
 
 ## Config File
 
-If `--config` is not provided, the tool automatically looks for one of these files in your current folder:
+If `--config` is not provided, the tool automatically looks for:
 
-- `srt-fetcher.json`
-- `.srt-fetcher.json`
+- `srt-downloader.yaml`
+- `.srt-downloader.yaml`
 
 Example:
 
-```json
-{
-  "path": ".",
-  "language": "sv",
-  "providers": ["opensubtitlescom"],
-  "only_selected_providers": false,
-  "detailed_progress": false,
-  "verbose": false,
-  "encoding": "utf-8"
-}
+```yaml
+path: .
+languages:
+  - sv
+  - en
+selected_providers:
+  - opensubtitlescom
+providers:
+  opensubtitlescom:
+    username: your_username
+    password: your_password
+only_selected_providers: false
+detailed_progress: false
+verbose: false
+encoding: utf-8
 ```
 
-Precedence rule:
+CLI flags override config values.
 
-- Command-line flags win over config values.
+## Provider Credentials
 
-## Provider Credentials (Optional)
-
-Public providers work without accounts. If you have provider accounts, export credentials to improve hit rate:
+Public providers work without accounts. If you have provider credentials, either place them in the YAML config or export them in your shell:
 
 ```bash
 export OPENSUBTITLESCOM_USERNAME="your_username"
@@ -181,80 +106,45 @@ export ADDIC7ED_USERNAME="your_username"
 export ADDIC7ED_PASSWORD="your_password"
 ```
 
-## How Matching Works
+Environment credentials override config credentials for the same provider.
 
-Per language, the tool uses two query stages:
+## How It Searches
 
-1. Full filename style query
-2. Simplified keyword query fallback
+For each language, the downloader tries:
 
-Example for `black-ish S01E02 The Talk.mp4`:
+1. The full filename.
+2. A simplified keyword query fallback.
 
-1. `black-ish S01E02 The Talk.mp4`
-2. `black-ish S01E02.mp4`
+If English is not already in your configured language list, it is appended automatically as the last fallback.
 
-Language flow:
+Existing subtitles are checked per language. A plain `.srt` file is treated as English for compatibility.
 
-1. Try primary language
-2. If not found, try English fallback
+## Build And Release
 
-## Existing Subtitle Rules
+To build locally:
 
-- Output subtitles are saved as `.language.srt` (for example `.sv.srt`, `.en.srt`).
-- Existing subtitles are checked per language.
-- If `.en.srt` exists and you request Swedish, it still searches for `.sv.srt`.
-- A plain `.srt` is treated as English for compatibility.
+```bash
+python3 -m pip install '.[build]'
+python3 -m build
+pyinstaller fetch_srt_subtitles.spec
+```
 
-## Terminal Output
+That produces:
 
-The live UI shows:
+- A wheel and source distribution in `dist/`
+- A standalone executable in `dist/`
 
-- Current file and current action
-- Recent completed file results
-- Provider source on successful downloads
-- Final summary, including per-provider download counts
+GitHub Actions now builds:
 
-Example recent line:
+- Python packages on Ubuntu
+- macOS standalone binaries for Intel and Apple Silicon
+- Windows standalone binaries for x64
 
-- `downloaded black-ish S01E15 The Dozens.mp4 (sv) from opensubtitles`
+Tagging a release like `vX.Y.Z` publishes those artifacts to GitHub Releases, which is what the one-line installers consume.
 
 ## Troubleshooting
 
-### No subtitles found
-
-- Try a different primary language.
-- Enable fallback providers (avoid `--only-selected-providers`).
-- Add provider credentials.
-- Use `--detailed-progress` to see provider-level attempts.
-
-### Too much output
-
-- Avoid `--verbose` unless debugging.
-- Keep default mode (faster and cleaner than detailed mode).
-
-### Stop safely
-
-Press `Ctrl+C` at any time. The tool exits cleanly and prints a partial summary.
-
-### Adding a Provider to the Setup File
-
-You can specify additional subtitle providers and their credentials in the setup file. Create a `srt-downloader.yaml` file in the same directory as the script or use the provided `srt-downloader.yaml.example` as a template.
-
-#### Example Setup File
-```yaml
-language:
-  - en
-  - sv
-providers:
-  opensubtitlescom:
-    username: your_username
-    password: your_password
-  addic7ed:
-    username: your_username
-    password: your_password
-detailed_progress: false
-verbose: false
-```
-
-- Replace `your_username` and `your_password` with your actual credentials.
-- The `language` field can accept a list of languages to download multiple subtitles per title.
+- If nothing is found, try a different language, more providers, or provider credentials.
+- If you want strict provider control, combine `-p` with `--only-selected-providers`.
+- If you need to inspect provider order before scanning, run `srt-download --list-providers`.
+- Press `Ctrl+C` to stop safely. The tool exits cleanly and prints a partial summary.

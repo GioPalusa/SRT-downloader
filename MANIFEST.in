@@ -1,0 +1,5 @@
+include fetch_srt_subtitles.spec
+include install.ps1
+include install.sh
+include requirements.txt
+include srt-downloader.yaml.example

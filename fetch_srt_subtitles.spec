@@ -1,12 +1,17 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules, copy_metadata
+
+
+babelfish_datas = collect_data_files('babelfish') + copy_metadata('babelfish')
+babelfish_hiddenimports = collect_submodules('babelfish.converters')
 
 a = Analysis(
     ['fetch_srt_subtitles.py'],
     pathex=[],
     binaries=[],
-    datas=[],
-    hiddenimports=['babelfish'],
+    datas=babelfish_datas,
+    hiddenimports=['babelfish', 'yaml'] + babelfish_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -22,7 +27,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='fetch_srt_subtitles',
+    name='srt-download',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

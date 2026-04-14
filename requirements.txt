@@ -1,2 +1,4 @@
-subliminal>=2.6.0
+babelfish>=0.6.1
+PyYAML>=6.0.1
 rich>=13.7.0
+subliminal>=2.6.0

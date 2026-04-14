@@ -8,10 +8,11 @@ import json
 import logging
 import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Any, Callable, Iterable
 
+import yaml
 from babelfish import Language
 from subliminal import VIDEO_EXTENSIONS, download_best_subtitles, region, save_subtitles, scan_video
 from subliminal.exceptions import GuessingError, ProviderError
@@ -48,14 +49,9 @@ class RunStats:
     scanned: int = 0
     downloaded: int = 0
     skipped_existing: int = 0
-    skipped_not_video: int = 0
     not_found: int = 0
     failed: int = 0
-    provider_downloads: Counter[str] | None = None
-
-    def __post_init__(self) -> None:
-        if self.provider_downloads is None:
-            self.provider_downloads = Counter()
+    provider_downloads: Counter[str] = field(default_factory=Counter)
 
 
 class StatusUI:
@@ -65,20 +61,21 @@ class StatusUI:
         self.live = None
         self.recent_results: deque[str] = deque(maxlen=8)
 
-    def print_splash(self, root: Path, primary_language: Language, providers: list[str]) -> None:
+    def print_splash(self, root: Path, languages: list[Language], providers: list[str]) -> None:
+        language_line = ", ".join(str(language) for language in languages)
+        provider_line = ", ".join(providers) if providers else "(none)"
+
         if self.enabled and self.console is not None:
             splash = Text()
-            splash.append("SRT Fetcher\n", style="bold magenta")
+            splash.append("SRT Downloader\n", style="bold magenta")
             splash.append(f"Root: {root}\n", style="cyan")
-            splash.append(f"Primary: {primary_language}\n", style="green")
-            splash.append("Fallback: en\n", style="yellow")
-            splash.append(f"Providers: {', '.join(providers)}", style="white")
+            splash.append(f"Languages: {language_line}\n", style="green")
+            splash.append(f"Providers: {provider_line}", style="white")
             self.console.print(Panel(splash, border_style="bright_blue", title="Live Mode"))
         else:
             print(f"Scanning {root}")
-            print(f"Primary language: {primary_language}")
-            print("Fallback language: en")
-            print(f"Providers: {', '.join(providers)}")
+            print(f"Languages: {language_line}")
+            print(f"Providers: {provider_line}")
 
     def start(self, message: str, stats: RunStats, detail_text: str = "Ready") -> None:
         if not self.enabled:
@@ -164,7 +161,7 @@ class StatusUI:
         return Group(current_panel, history_panel)
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Recursively scan a folder for video files, search online for matching subtitles, "
@@ -175,14 +172,14 @@ def parse_args() -> argparse.Namespace:
         "path",
         nargs="?",
         default=None,
-        help="Folder to scan. Defaults to config path or current working directory.",
+        help="Folder to scan. Defaults to the configured path or the current working directory.",
     )
     parser.add_argument(
         "--config",
         default=None,
         help=(
-            "Optional path to a JSON config file. If omitted, the script auto-loads "
-            "srt-fetcher.json or .srt-fetcher.json from the current directory when present."
+            "Optional path to a YAML config file. If omitted, the tool auto-loads "
+            "srt-downloader.yaml or .srt-downloader.yaml from the current directory when present."
         ),
     )
     parser.add_argument(
@@ -190,8 +187,8 @@ def parse_args() -> argparse.Namespace:
         "--language",
         default=None,
         help=(
-            "Primary subtitle language as IETF code, for example en, nl, pt-BR. "
-            "If that language is not found, the script falls back to English. Default: en."
+            "Primary subtitle language as an IETF code, for example en, sv, or pt-BR. "
+            "English is appended automatically as a fallback when it is not already included."
         ),
     )
     parser.add_argument(
@@ -201,8 +198,7 @@ def parse_args() -> argparse.Namespace:
         dest="providers",
         help=(
             "Subtitle provider to prioritize. Repeat to use multiple providers. "
-            "By default, built-in public providers are still used as fallback and "
-            "credentialed providers are auto-added when environment variables are present."
+            "Configured and environment credential providers are auto-added."
         ),
     )
     parser.add_argument(
@@ -229,10 +225,7 @@ def parse_args() -> argparse.Namespace:
         "--only-selected-providers",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help=(
-            "Use only providers selected with --provider plus any credentialed providers "
-            "detected from environment variables. Skip public-provider fallback."
-        ),
+        help="Use only explicitly selected and credentialed providers. Skip public fallback providers.",
     )
     parser.add_argument(
         "--list-providers",
@@ -249,119 +242,196 @@ def parse_args() -> argparse.Namespace:
         action="version",
         version=f"SRT Downloader {APP_VERSION}",
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
-def load_config(config_arg: str | None) -> tuple[dict, Path | None]:
-    """Load configuration from a YAML file."""
+def first_defined(*values: Any) -> Any:
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
+def normalize_string_list(value: Any, key_name: str) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        items = [value]
+    elif isinstance(value, list):
+        items = value
+    else:
+        raise ValueError(f"Config key '{key_name}' must be a string or a list of strings.")
+
+    normalized: list[str] = []
+    for item in items:
+        if not isinstance(item, str):
+            raise ValueError(f"Config key '{key_name}' must contain only strings.")
+        cleaned = item.strip()
+        if cleaned and cleaned not in normalized:
+            normalized.append(cleaned)
+    return normalized
+
+
+def load_config(config_arg: str | None) -> tuple[dict[str, Any], Path | None]:
     config_path = None
-    config = {}
+    config: dict[str, Any] = {}
 
     if config_arg:
-        config_path = Path(config_arg)
+        config_path = Path(config_arg).expanduser()
+        if not config_path.exists():
+            raise ValueError(f"Config file not found: {config_path}")
     else:
         for default_file in DEFAULT_CONFIG_FILES:
-            path = Path(default_file)
-            if path.exists():
-                config_path = path
+            candidate = Path(default_file)
+            if candidate.exists():
+                config_path = candidate
                 break
 
-    if config_path and config_path.exists():
-        with open(config_path, "r", encoding="utf-8") as f:
-            config = yaml.safe_load(f)
+    if config_path is not None:
+        with config_path.open("r", encoding="utf-8") as handle:
+            loaded = yaml.safe_load(handle) or {}
+        if not isinstance(loaded, dict):
+            raise ValueError("The config file must contain a YAML mapping at the top level.")
+        config = loaded
 
-    # Ensure providers key exists and is a dictionary
-    config.setdefault("providers", {})
+    raw_providers = config.get("providers", {})
+    provider_credentials: dict[str, dict[str, str]] = {}
+    legacy_selected_providers: list[str] = []
 
-    # Validate that 'providers' is a dictionary
-    if not isinstance(config["providers"], dict):
-        raise ValueError(
-            "Config key 'providers' must be a YAML mapping where each key is a provider name and the value is a mapping with 'username' and 'password'.\n"
-            "Example:\n"
-            "providers:\n"
-            "  opensubtitlescom:\n"
-            "    username: your_username\n"
-            "    password: your_password\n"
-            "  addic7ed:\n"
-            "    username: your_username\n"
-            "    password: your_password"
-        )
+    if isinstance(raw_providers, dict):
+        for provider_name, credentials in raw_providers.items():
+            if not isinstance(provider_name, str):
+                raise ValueError("Config provider names must be strings.")
+            if credentials is None:
+                provider_credentials[provider_name] = {}
+                continue
+            if not isinstance(credentials, dict):
+                raise ValueError(
+                    "Config key 'providers' must be a mapping of provider names to provider settings."
+                )
+            provider_credentials[provider_name] = {
+                str(key): str(value)
+                for key, value in credentials.items()
+                if value is not None
+            }
+    elif isinstance(raw_providers, list):
+        legacy_selected_providers = normalize_string_list(raw_providers, "providers")
+    else:
+        raise ValueError("Config key 'providers' must be either a mapping or a list of strings.")
 
+    config["providers"] = provider_credentials
+    config["selected_providers"] = normalize_string_list(
+        first_defined(config.get("selected_providers"), legacy_selected_providers),
+        "selected_providers",
+    )
     return config, config_path
 
 
-def resolve_runtime_options(args, config) -> dict:
-    """Resolve runtime options by merging CLI arguments and config file."""
-    try:
-        runtime = {
-            "path": args.path or config.get("path", "."),
-            "language": args.language or config.get("language", "en"),
-            "providers": getattr(args, "provider", None) or config.get("providers", []),
-            "only_selected_providers": args.only_selected_providers or config.get("only_selected_providers", False),
-            "detailed_progress": args.detailed_progress or config.get("detailed_progress", False),
-            "verbose": args.verbose or config.get("verbose", False),
-            "encoding": args.encoding or config.get("encoding", "utf-8"),
-        }
+def resolve_runtime_options(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, Any]:
+    language_value = first_defined(args.language, config.get("languages"), config.get("language"), "en")
+    languages = normalize_string_list(language_value, "language")
+    if not languages:
+        raise ValueError("At least one subtitle language must be configured.")
+    if "en" not in {language.lower() for language in languages}:
+        languages.append("en")
 
-        # Ensure language is a list
-        if isinstance(runtime["language"], str):
-            runtime["language"] = [runtime["language"]]
-        elif not isinstance(runtime["language"], list):
-            raise ValueError("Config key 'language' must be a string or a list of strings.")
+    providers = normalize_string_list(
+        first_defined(args.providers, config.get("selected_providers"), []),
+        "selected_providers",
+    )
 
-        return runtime
+    runtime = {
+        "path": str(first_defined(args.path, config.get("path"), ".")),
+        "languages": languages,
+        "providers": providers,
+        "only_selected_providers": bool(
+            first_defined(args.only_selected_providers, config.get("only_selected_providers"), False)
+        ),
+        "detailed_progress": bool(
+            first_defined(args.detailed_progress, config.get("detailed_progress"), False)
+        ),
+        "verbose": bool(first_defined(args.verbose, config.get("verbose"), False)),
+        "encoding": str(first_defined(args.encoding, config.get("encoding"), "utf-8")),
+    }
+    return runtime
 
-    except AttributeError as e:
-        missing_attr = str(e).split("'")[-2]
-        raise ValueError(f"Missing or misnamed CLI argument: '{missing_attr}'. Please check your command.")
+
+def merge_provider_configs(config_provider_configs: dict[str, dict[str, str]]) -> dict[str, dict[str, str]]:
+    merged = {name: values.copy() for name, values in config_provider_configs.items()}
+    for provider_name, credentials in provider_configs_from_env().items():
+        merged[provider_name] = credentials
+    return merged
+
+
+def resolve_providers(
+    selected_providers: list[str],
+    provider_configs: dict[str, dict[str, str]],
+    only_selected_providers: bool,
+) -> list[str]:
+    effective: list[str] = []
+
+    def add_provider(name: str) -> None:
+        if name and name not in effective:
+            effective.append(name)
+
+    for provider in selected_providers:
+        add_provider(provider)
+
+    for provider in provider_configs:
+        add_provider(provider)
+
+    if not only_selected_providers:
+        for provider in DEFAULT_PROVIDERS:
+            add_provider(provider)
+
+    return effective
 
 
 def print_provider_report(
-    runtime: dict,
+    runtime: dict[str, Any],
     provider_configs: dict[str, dict[str, str]],
     providers: list[str],
 ) -> None:
-    selected = runtime["providers"] or []
+    selected = runtime["providers"]
     credentialed = sorted(provider_configs.keys())
-
-    if selected:
-        if runtime["only_selected_providers"]:
-            public_fallback = []
-        else:
-            public_fallback = [name for name in DEFAULT_PROVIDERS if name not in selected]
-    else:
-        public_fallback = list(DEFAULT_PROVIDERS)
+    public_fallback = [
+        provider
+        for provider in DEFAULT_PROVIDERS
+        if provider not in selected and provider not in credentialed
+    ]
+    if runtime["only_selected_providers"]:
+        public_fallback = []
 
     print("Provider Report")
     print(f"Selected providers: {', '.join(selected) if selected else '(none)'}")
     print(
-        "Public fallback providers: "
-        f"{', '.join(public_fallback) if public_fallback else '(disabled)'}"
+        "Credentialed providers from config or environment: "
+        f"{', '.join(credentialed) if credentialed else '(none)'}"
     )
     print(
-        "Credentialed providers from environment: "
-        f"{', '.join(credentialed) if credentialed else '(none)'}"
+        "Public fallback providers: "
+        f"{', '.join(public_fallback) if public_fallback else '(disabled)'}"
     )
     print(f"Effective provider order: {', '.join(providers) if providers else '(none)'}")
 
 
 def print_effective_config(
     config_path: Path | None,
-    runtime: dict,
+    runtime: dict[str, Any],
     provider_configs: dict[str, dict[str, str]],
     providers: list[str],
 ) -> None:
     effective = {
         "version": APP_VERSION,
-        "config_file": str(config_path) if config_path is not None else None,
+        "config_file": str(config_path.resolve()) if config_path is not None else None,
         "path": str(Path(runtime["path"]).expanduser().resolve()),
-        "language": runtime["language"],
+        "languages": runtime["languages"],
         "encoding": runtime["encoding"],
         "verbose": runtime["verbose"],
         "detailed_progress": runtime["detailed_progress"],
         "only_selected_providers": runtime["only_selected_providers"],
-        "selected_providers": runtime["providers"] or [],
-        "credentialed_providers_from_env": sorted(provider_configs.keys()),
+        "selected_providers": runtime["providers"],
+        "credentialed_providers": sorted(provider_configs.keys()),
         "effective_providers": providers,
     }
     print(json.dumps(effective, indent=2, sort_keys=True))
@@ -391,71 +461,38 @@ def iter_video_files(root: Path) -> Iterable[Path]:
             yield path
 
 
-def load_language(language_code: str) -> Language:
-    try:
-        return Language.fromietf(language_code)
-    except Exception as exc:  # pragma: no cover - defensive error message for invalid input
-        raise SystemExit(f"Invalid language code: {language_code}") from exc
+def load_languages(language_codes: Iterable[str]) -> list[Language]:
+    languages: list[Language] = []
+    for language_code in language_codes:
+        try:
+            languages.append(Language.fromietf(language_code))
+        except Exception as exc:  # pragma: no cover - defensive error message for invalid input
+            raise ValueError(f"Invalid language code: {language_code}") from exc
+    return languages
 
 
 def provider_configs_from_env() -> dict[str, dict[str, str]]:
-    """Retrieve provider credentials from environment variables."""
     env_providers = {}
 
     if os.getenv("OPENSUBTITLESCOM_USERNAME") and os.getenv("OPENSUBTITLESCOM_PASSWORD"):
         env_providers["opensubtitlescom"] = {
-            "username": os.getenv("OPENSUBTITLESCOM_USERNAME"),
-            "password": os.getenv("OPENSUBTITLESCOM_PASSWORD"),
+            "username": os.getenv("OPENSUBTITLESCOM_USERNAME", ""),
+            "password": os.getenv("OPENSUBTITLESCOM_PASSWORD", ""),
         }
 
     if os.getenv("OPENSUBTITLES_USERNAME") and os.getenv("OPENSUBTITLES_PASSWORD"):
         env_providers["opensubtitles"] = {
-            "username": os.getenv("OPENSUBTITLES_USERNAME"),
-            "password": os.getenv("OPENSUBTITLES_PASSWORD"),
+            "username": os.getenv("OPENSUBTITLES_USERNAME", ""),
+            "password": os.getenv("OPENSUBTITLES_PASSWORD", ""),
         }
 
     if os.getenv("ADDIC7ED_USERNAME") and os.getenv("ADDIC7ED_PASSWORD"):
         env_providers["addic7ed"] = {
-            "username": os.getenv("ADDIC7ED_USERNAME"),
-            "password": os.getenv("ADDIC7ED_PASSWORD"),
+            "username": os.getenv("ADDIC7ED_USERNAME", ""),
+            "password": os.getenv("ADDIC7ED_PASSWORD", ""),
         }
 
     return env_providers
-
-
-def resolve_providers(
-    cli_providers: list[str] | None,
-    provider_configs: dict[str, dict[str, str]],
-    only_selected_providers: bool,
-) -> tuple[list[str], list[str]]:
-    """Resolve the effective list of providers to use, separating credentialed and public providers."""
-    credentialed_providers = []
-    public_providers = []
-
-    # Add CLI-specified providers first
-    if cli_providers:
-        for provider in cli_providers:
-            if provider in provider_configs:
-                credentialed_providers.append(provider)
-            else:
-                public_providers.append(provider)
-
-    # Add providers from config file if not restricted to CLI-only
-    if not only_selected_providers:
-        for provider in DEFAULT_PROVIDERS:
-            if provider not in credentialed_providers:
-                public_providers.append(provider)
-
-    # Add credentialed providers from config file
-    for provider_name, credentials in provider_configs.get("providers", {}).items():
-        if provider_name not in credentialed_providers:
-            credentialed_providers.append(provider_name)
-
-    return credentialed_providers, public_providers
-
-
-def target_subtitle_path(video_path: Path) -> Path:
-    return video_path.with_suffix(".srt")
 
 
 def existing_subtitle_paths(video_path: Path) -> list[Path]:
@@ -471,17 +508,16 @@ def existing_subtitle_paths(video_path: Path) -> list[Path]:
 
 
 def has_subtitle_for_language(video_path: Path, language: Language) -> bool:
-    basename = video_path.stem
-    lang = language.alpha2.lower()
+    basename = video_path.stem.lower()
+    language_code = language.alpha2.lower()
 
     for subtitle_path in existing_subtitle_paths(video_path):
         name = subtitle_path.name.lower()
 
-        if name == f"{basename.lower()}.{lang}.srt":
+        if name == f"{basename}.{language_code}.srt":
             return True
 
-        # Treat a generic .srt as English for backward compatibility.
-        if lang == "en" and name == f"{basename.lower()}.srt":
+        if language_code == "en" and name == f"{basename}.srt":
             return True
 
     return False
@@ -530,6 +566,9 @@ def try_download_for_language(
     save_video=None,
     progress_cb: Callable[[str], None] | None = None,
 ) -> tuple[str, str | None]:
+    if not providers:
+        return ("not_found", None)
+
     save_target = save_video if save_video is not None else video
 
     if not detailed_progress:
@@ -625,7 +664,7 @@ def try_download_for_language(
 
         had_errors = True
 
-    return (("failed", None) if had_errors else ("not_found", None))
+    return ("failed", None) if had_errors else ("not_found", None)
 
 
 def fetch_subtitle_for_video(
@@ -637,130 +676,161 @@ def fetch_subtitle_for_video(
     detailed_progress: bool,
     progress_cb: Callable[[str], None] | None = None,
 ) -> tuple[str, Language | None, str | None]:
-    """Fetch subtitles for a video, prioritizing credentialed providers first."""
-    credentialed_providers, public_providers = resolve_providers(providers, provider_configs, False)
+    try:
+        video = scan_video(str(video_path))
+    except GuessingError as exc:
+        logging.warning("Could not parse video metadata for %s: %s", video_path.name, exc)
+        return ("failed", None, None)
+    except Exception as exc:  # pragma: no cover - keep the batch running on unexpected scan failures
+        logging.exception("Unexpected scan error for %s", video_path.name)
+        logging.debug("Unexpected exception details: %s", exc)
+        return ("failed", None, None)
 
-    # Try credentialed providers first
-    for language in languages:
-        for provider in credentialed_providers:
-            status, downloaded_language, provider_name = try_download_for_language(
-                video_path, language, [provider], provider_configs, encoding, detailed_progress, progress_cb=progress_cb
-            )
-            if status == "downloaded":
-                return status, downloaded_language, provider_name
+    keyword_video = build_keyword_query_video(video)
+    had_errors = False
 
-    # If no match, try public providers in bulk
     for language in languages:
-        status, downloaded_language, provider_name = try_download_for_language(
-            video_path, language, public_providers, provider_configs, encoding, detailed_progress, progress_cb=progress_cb
+        if has_subtitle_for_language(video_path, language):
+            if progress_cb is not None:
+                progress_cb(f"subtitle already exists for {language}")
+            return ("exists", language, None)
+
+        status, provider_name = try_download_for_language(
+            video,
+            language,
+            providers,
+            provider_configs,
+            encoding,
+            detailed_progress,
+            query_label="full filename",
+            progress_cb=progress_cb,
         )
         if status == "downloaded":
-            return status, downloaded_language, provider_name
+            return ("downloaded", language, provider_name)
+        if status == "failed":
+            had_errors = True
 
-    return "not_found", None, None
+        if keyword_video is None:
+            continue
+
+        status, provider_name = try_download_for_language(
+            keyword_video,
+            language,
+            providers,
+            provider_configs,
+            encoding,
+            detailed_progress,
+            query_label="keyword fallback",
+            save_video=video,
+            progress_cb=progress_cb,
+        )
+        if status == "downloaded":
+            return ("downloaded", language, provider_name)
+        if status == "failed":
+            had_errors = True
+
+    return ("failed", None, None) if had_errors else ("not_found", None, None)
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     try:
-        args = parse_args()
+        args = parse_args(argv)
         config, config_path = load_config(args.config)
         runtime = resolve_runtime_options(args, config)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
 
-        if args.list_providers:
-            print_provider_report(runtime, config.get("providers", {}), resolve_providers(
-                runtime["providers"], config, runtime["only_selected_providers"]
-            ))
-            return
+    provider_configs = merge_provider_configs(config.get("providers", {}))
+    providers = resolve_providers(
+        runtime["providers"],
+        provider_configs,
+        runtime["only_selected_providers"],
+    )
 
-        if args.print_effective_config:
-            print_effective_config(config_path, runtime, config.get("providers", {}), resolve_providers(
-                runtime["providers"], config, runtime["only_selected_providers"]
-            ))
-            return
+    if args.list_providers:
+        print_provider_report(runtime, provider_configs, providers)
+        return 0
 
-        configure_logging(runtime["verbose"])
+    if args.print_effective_config:
+        print_effective_config(config_path, runtime, provider_configs, providers)
+        return 0
 
-        root = Path(runtime["path"]).expanduser().resolve()
-        if not root.exists() or not root.is_dir():
-            print(f"Scan path does not exist or is not a directory: {root}", file=sys.stderr)
-            return 2
+    configure_logging(runtime["verbose"])
 
-        configure_cache(root)
+    try:
+        languages = load_languages(runtime["languages"])
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
 
-        primary_language = load_language(runtime["language"])
+    root = Path(runtime["path"]).expanduser().resolve()
+    if not root.exists() or not root.is_dir():
+        print(f"Scan path does not exist or is not a directory: {root}", file=sys.stderr)
+        return 2
 
-        ui = StatusUI(enabled=not runtime["verbose"])
-        ui.print_splash(root, primary_language, providers)
+    configure_cache(root)
 
-        stats = RunStats()
-        interrupted = False
-        last_result = "Ready"
-        ui.start("Warming up subtitle engines...", stats, detail_text="starting up")
-        try:
-            for video_path in iter_video_files(root):
-                current_line = f"Scanning {video_path.name}..."
-                ui.update(current_line, stats, detail_text="queued")
+    ui = StatusUI(enabled=not runtime["verbose"])
+    ui.print_splash(root, languages, providers)
 
-                def set_detail(detail: str) -> None:
-                    ui.update(current_line, stats, detail_text=detail)
+    stats = RunStats()
+    interrupted = False
+    ui.start("Warming up subtitle engines...", stats, detail_text="starting up")
+    try:
+        for video_path in iter_video_files(root):
+            current_line = f"Scanning {video_path.name}..."
+            ui.update(current_line, stats, detail_text="queued")
 
-                stats.scanned += 1
-                result, downloaded_language, provider_name = fetch_subtitle_for_video(
-                    video_path=video_path,
-                    primary_language=primary_language,
-                    providers=providers,
-                    provider_configs=provider_configs,
-                    encoding=runtime["encoding"],
-                    detailed_progress=runtime["detailed_progress"],
-                    progress_cb=set_detail,
-                )
+            def set_detail(detail: str) -> None:
+                ui.update(current_line, stats, detail_text=detail)
 
-                if result == "downloaded":
-                    stats.downloaded += 1
-                    if provider_name:
-                        last_result = f"downloaded {video_path.name} ({downloaded_language}) from {provider_name}"
-                        stats.provider_downloads[provider_name] += 1
-                    else:
-                        last_result = f"downloaded {video_path.name} ({downloaded_language})"
-                    ui.add_result(last_result)
-                    ui.update(current_line, stats, detail_text="completed: downloaded")
-                elif result == "exists":
-                    stats.skipped_existing += 1
-                    last_result = f"skipped {video_path.name}"
-                    ui.add_result(last_result)
-                    ui.update(current_line, stats, detail_text="completed: skipped")
-                elif result == "not_found":
-                    stats.not_found += 1
-                    last_result = f"not found {video_path.name}"
-                    ui.add_result(last_result)
-                    ui.update(current_line, stats, detail_text="completed: not found")
+            stats.scanned += 1
+            result, downloaded_language, provider_name = fetch_subtitle_for_video(
+                video_path=video_path,
+                languages=languages,
+                providers=providers,
+                provider_configs=provider_configs,
+                encoding=runtime["encoding"],
+                detailed_progress=runtime["detailed_progress"],
+                progress_cb=set_detail,
+            )
+
+            if result == "downloaded":
+                stats.downloaded += 1
+                if provider_name is not None:
+                    stats.provider_downloads[provider_name] += 1
+                    ui.add_result(
+                        f"downloaded {video_path.name} ({downloaded_language}) from {provider_name}"
+                    )
                 else:
-                    stats.failed += 1
-                    last_result = f"failed {video_path.name}"
-                    ui.add_result(last_result)
-                    ui.update(current_line, stats, detail_text="completed: failed")
-        except KeyboardInterrupt:
-            interrupted = True
-            ui.update("Interrupted by user. Cleaning up...", stats, detail_text="cancelled by user")
-
+                    ui.add_result(f"downloaded {video_path.name} ({downloaded_language})")
+                ui.update(current_line, stats, detail_text="completed: downloaded")
+            elif result == "exists":
+                stats.skipped_existing += 1
+                ui.add_result(f"skipped {video_path.name}")
+                ui.update(current_line, stats, detail_text="completed: skipped")
+            elif result == "not_found":
+                stats.not_found += 1
+                ui.add_result(f"not found {video_path.name}")
+                ui.update(current_line, stats, detail_text="completed: not found")
+            else:
+                stats.failed += 1
+                ui.add_result(f"failed {video_path.name}")
+                ui.update(current_line, stats, detail_text="completed: failed")
+    except KeyboardInterrupt:
+        interrupted = True
+        ui.update("Interrupted by user. Cleaning up...", stats, detail_text="cancelled by user")
+    finally:
         ui.stop()
 
-        print()
-        ui.print_summary(stats, interrupted)
+    print()
+    ui.print_summary(stats, interrupted)
 
-        if interrupted:
-            return 130
-
-    except ValueError as e:
-        print(f"Error: {e}\n")
-        print("Showing help:\n")
-        parse_args(["--help"])
-
+    if interrupted:
+        return 130
     return 0 if stats.failed == 0 else 1
 
 
 if __name__ == "__main__":
-    main()
-
-# Change the script name to `srt-download` for invocation
-# Update all references to "fetch-srt" to "srt-download" in the script and documentation.
+    raise SystemExit(main())

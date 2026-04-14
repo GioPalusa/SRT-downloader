@@ -1,11 +1,18 @@
 # Example configuration file for SRT Downloader
 
-# Primary and fallback languages for subtitles
-language:
-  - en
-  - sv
+# Folder to scan. Defaults to the current directory when omitted.
+path: .
 
-# Subtitle providers and their credentials
+# Languages are tried in order. English is appended automatically if not present.
+languages:
+  - sv
+  - en
+
+# Optional preferred provider order. Public fallback providers are appended unless disabled.
+selected_providers:
+  - opensubtitlescom
+
+# Optional provider credentials.
 providers:
   opensubtitlescom:
     username: your_username
@@ -14,17 +21,14 @@ providers:
     username: your_username
     password: your_password
 
-# Whether to show detailed progress for each provider (slower)
-detailed_progress: false
-
-# Enable verbose logging for debugging
-verbose: false
-
-# Encoding for subtitle files
-encoding: utf-8
-
-# Restrict to only selected providers (no public fallback)
+# Restrict the run to only selected and credentialed providers.
 only_selected_providers: false
 
-# Path to scan for video files
-path: .
+# Slower, but shows provider-by-provider progress.
+detailed_progress: false
+
+# Enable debug logging.
+verbose: false
+
+# Subtitle file encoding.
+encoding: utf-8

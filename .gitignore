@@ -2,3 +2,6 @@
 __pycache__/
 *.pyc
 .subtitle-cache/
+build/
+dist/
+*.egg-info/

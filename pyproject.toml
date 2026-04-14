@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "srt-downloader"
+version = "0.1.0"
+description = "Download subtitles for local video files recursively."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "babelfish>=0.6.1",
+  "PyYAML>=6.0.1",
+  "rich>=13.7.0",
+  "subliminal>=2.6.0",
+]
+keywords = ["subtitle", "srt", "cli", "video"]
+classifiers = [
+  "Environment :: Console",
+  "Intended Audience :: End Users/Desktop",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Multimedia :: Video",
+]
+
+[project.optional-dependencies]
+build = [
+  "build>=1.2.2",
+  "pyinstaller>=6.6.0",
+]
+
+[project.scripts]
+srt-download = "fetch_srt_subtitles:main"
+
+[project.urls]
+Homepage = "https://github.com/GioPalusa/SRT-downloader"
+Issues = "https://github.com/GioPalusa/SRT-downloader/issues"
+
+[tool.setuptools]
+py-modules = ["fetch_srt_subtitles"]
