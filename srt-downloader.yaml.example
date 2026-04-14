@@ -1,0 +1,30 @@
+# Example configuration file for SRT Downloader
+
+# Primary and fallback languages for subtitles
+language:
+  - en
+  - sv
+
+# Subtitle providers and their credentials
+providers:
+  opensubtitlescom:
+    username: your_username
+    password: your_password
+  addic7ed:
+    username: your_username
+    password: your_password
+
+# Whether to show detailed progress for each provider (slower)
+detailed_progress: false
+
+# Enable verbose logging for debugging
+verbose: false
+
+# Encoding for subtitle files
+encoding: utf-8
+
+# Restrict to only selected providers (no public fallback)
+only_selected_providers: false
+
+# Path to scan for video files
+path: .
