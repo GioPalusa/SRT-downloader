@@ -40,6 +40,8 @@ DEFAULT_CONFIG_FILES = [
     ".srt-fetcher.json",
 ]
 
+APP_VERSION = "0.1.0"
+
 
 @dataclass
 class RunStats:
@@ -232,10 +234,25 @@ def parse_args() -> argparse.Namespace:
             "detected from environment variables. Skip public-provider fallback."
         ),
     )
+    parser.add_argument(
+        "--list-providers",
+        action="store_true",
+        help="Print provider selection details and exit.",
+    )
+    parser.add_argument(
+        "--print-effective-config",
+        action="store_true",
+        help="Print merged runtime configuration and exit.",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"SRT Downloader {APP_VERSION}",
+    )
     return parser.parse_args()
 
 
-def load_config(config_arg: str | None) -> dict:
+def load_config(config_arg: str | None) -> tuple[dict, Path | None]:
     config_path: Path | None = None
 
     if config_arg:
@@ -251,7 +268,7 @@ def load_config(config_arg: str | None) -> dict:
                 break
 
     if config_path is None:
-        return {}
+        return ({}, None)
 
     try:
         raw = json.loads(config_path.read_text(encoding="utf-8"))
@@ -263,7 +280,7 @@ def load_config(config_arg: str | None) -> dict:
     if not isinstance(raw, dict):
         raise SystemExit(f"Config file must contain a JSON object: {config_path}")
 
-    return raw
+    return (raw, config_path)
 
 
 def resolve_runtime_options(args: argparse.Namespace, config: dict) -> dict:
@@ -296,6 +313,57 @@ def resolve_runtime_options(args: argparse.Namespace, config: dict) -> dict:
         "verbose": verbose,
         "only_selected_providers": only_selected_providers,
     }
+
+
+def print_provider_report(
+    runtime: dict,
+    provider_configs: dict[str, dict[str, str]],
+    providers: list[str],
+) -> None:
+    selected = runtime["providers"] or []
+    credentialed = sorted(provider_configs.keys())
+
+    if selected:
+        if runtime["only_selected_providers"]:
+            public_fallback = []
+        else:
+            public_fallback = [name for name in DEFAULT_PROVIDERS if name not in selected]
+    else:
+        public_fallback = list(DEFAULT_PROVIDERS)
+
+    print("Provider Report")
+    print(f"Selected providers: {', '.join(selected) if selected else '(none)'}")
+    print(
+        "Public fallback providers: "
+        f"{', '.join(public_fallback) if public_fallback else '(disabled)'}"
+    )
+    print(
+        "Credentialed providers from environment: "
+        f"{', '.join(credentialed) if credentialed else '(none)'}"
+    )
+    print(f"Effective provider order: {', '.join(providers) if providers else '(none)'}")
+
+
+def print_effective_config(
+    config_path: Path | None,
+    runtime: dict,
+    provider_configs: dict[str, dict[str, str]],
+    providers: list[str],
+) -> None:
+    effective = {
+        "version": APP_VERSION,
+        "config_file": str(config_path) if config_path is not None else None,
+        "path": str(Path(runtime["path"]).expanduser().resolve()),
+        "language": runtime["language"],
+        "encoding": runtime["encoding"],
+        "verbose": runtime["verbose"],
+        "detailed_progress": runtime["detailed_progress"],
+        "only_selected_providers": runtime["only_selected_providers"],
+        "selected_providers": runtime["providers"] or [],
+        "credentialed_providers_from_env": sorted(provider_configs.keys()),
+        "effective_providers": providers,
+    }
+    print(json.dumps(effective, indent=2, sort_keys=True))
 
 
 def configure_logging(verbose: bool) -> None:
@@ -652,8 +720,25 @@ def fetch_subtitle_for_video(
 
 def main() -> int:
     args = parse_args()
-    config = load_config(args.config)
+    config, config_path = load_config(args.config)
     runtime = resolve_runtime_options(args, config)
+
+    provider_configs = provider_configs_from_env()
+    providers = resolve_providers(
+        runtime["providers"],
+        provider_configs,
+        runtime["only_selected_providers"],
+    )
+
+    if args.list_providers:
+        print_provider_report(runtime, provider_configs, providers)
+
+    if args.print_effective_config:
+        print_effective_config(config_path, runtime, provider_configs, providers)
+
+    if args.list_providers or args.print_effective_config:
+        return 0
+
     configure_logging(runtime["verbose"])
 
     root = Path(runtime["path"]).expanduser().resolve()
@@ -664,12 +749,6 @@ def main() -> int:
     configure_cache(root)
 
     primary_language = load_language(runtime["language"])
-    provider_configs = provider_configs_from_env()
-    providers = resolve_providers(
-        runtime["providers"],
-        provider_configs,
-        runtime["only_selected_providers"],
-    )
 
     ui = StatusUI(enabled=not runtime["verbose"])
     ui.print_splash(root, primary_language, providers)
