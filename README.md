@@ -1,8 +1,11 @@
-# SRT Fetcher
+# SRT Downloader
+
+<img width="846" height="429" alt="Skärmavbild 2026-04-14 kl  21 38 18" src="https://github.com/user-attachments/assets/fbca22f4-deef-4ea5-949a-cb8de8f690bf" />
 
 This script scans the folder where you run it, walks through all subfolders, finds video files, searches online for matching subtitles, and saves the subtitle next to the video using the same basename.
 
 It first searches in your chosen primary language. If nothing is found, it automatically falls back to English.
+
 
 The default output uses a live colorful status panel with in-place updates and spinner animation, so the terminal stays clean while the scan is running.
 
