@@ -103,12 +103,14 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          if git diff --quiet -- Formula/srt-download.rb; then
+          # Stage first so the check also catches a brand-new (untracked)
+          # formula file, which `git diff` alone would not report.
+          git add Formula/srt-download.rb
+          if git diff --cached --quiet -- Formula/srt-download.rb; then
             echo "Formula already up to date."
             exit 0
           fi
 
-          git add Formula/srt-download.rb
           git commit -m "Update srt-download to ${VERSION}"
           git push
 
