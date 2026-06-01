@@ -18,7 +18,10 @@ case "$ARCH_NAME" in
     ASSET_NAME="srt-download-macos-arm64"
     ;;
   x86_64)
-    ASSET_NAME="srt-download-macos-x64"
+    printf 'Intel Macs are not supported by the standalone binary.\n' >&2
+    printf 'Install via pipx instead:\n' >&2
+    printf '  pipx install git+https://github.com/%s.git\n' "$REPO" >&2
+    exit 1
     ;;
   *)
     printf 'Unsupported macOS architecture: %s\n' "$ARCH_NAME" >&2

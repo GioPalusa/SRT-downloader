@@ -53,10 +53,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-13
-            artifact_name: standalone-macos-x64
-            executable_name: srt-download
-            asset_name: srt-download-macos-x64
           - os: macos-14
             artifact_name: standalone-macos-arm64
             executable_name: srt-download
@@ -118,6 +114,5 @@ jobs:
         with:
           files: |
             release-assets/python-packages/*
-            release-assets/standalone-macos-x64/srt-download-macos-x64
             release-assets/standalone-macos-arm64/srt-download-macos-arm64
             release-assets/standalone-windows-x64/srt-download-windows-x64.exe

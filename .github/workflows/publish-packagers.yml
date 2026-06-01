@@ -69,14 +69,12 @@ jobs:
           mkdir -p release-assets
           base_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}"
           curl -fsSL "$base_url/srt-download-macos-arm64" -o release-assets/srt-download-macos-arm64
-          curl -fsSL "$base_url/srt-download-macos-x64" -o release-assets/srt-download-macos-x64
 
       - name: Compute Homebrew checksums
         if: steps.gate.outputs.enabled == 'true'
         id: checksums
         run: |
           echo "arm64=$(shasum -a 256 release-assets/srt-download-macos-arm64 | awk '{print $1}')" >> "$GITHUB_OUTPUT"
-          echo "x64=$(shasum -a 256 release-assets/srt-download-macos-x64 | awk '{print $1}')" >> "$GITHUB_OUTPUT"
 
       - name: Check out Homebrew tap
         if: steps.gate.outputs.enabled == 'true'
@@ -94,8 +92,7 @@ jobs:
             --repository "${GITHUB_REPOSITORY}" \
             --tag "${{ steps.metadata.outputs.release_tag }}" \
             --version "${{ steps.metadata.outputs.version }}" \
-            --sha256-arm64 "${{ steps.checksums.outputs.arm64 }}" \
-            --sha256-x64 "${{ steps.checksums.outputs.x64 }}"
+            --sha256-arm64 "${{ steps.checksums.outputs.arm64 }}"
 
       - name: Commit and push formula update
         if: steps.gate.outputs.enabled == 'true'

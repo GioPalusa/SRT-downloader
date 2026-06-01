@@ -14,11 +14,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tag", required=True, help="Git tag for the release, for example v0.1.0.")
     parser.add_argument("--version", required=True, help="Version string without the v prefix.")
     parser.add_argument("--sha256-arm64", required=True, help="SHA256 for the macOS arm64 binary.")
-    parser.add_argument("--sha256-x64", required=True, help="SHA256 for the macOS x64 binary.")
     return parser.parse_args()
 
 
-def build_formula(repository: str, tag: str, version: str, sha256_arm64: str, sha256_x64: str) -> str:
+def build_formula(repository: str, tag: str, version: str, sha256_arm64: str) -> str:
     base_url = f"https://github.com/{repository}/releases/download/{tag}"
     return dedent(
         f"""
@@ -27,18 +26,17 @@ def build_formula(repository: str, tag: str, version: str, sha256_arm64: str, sh
           homepage \"https://github.com/{repository}\"
           version \"{version}\"
 
+          # Prebuilt binaries are published for Apple Silicon only. Intel Mac
+          # users should install via pipx (see the project README).
+          depends_on arch: :arm64
+
           on_macos do
-            if Hardware::CPU.arm?
-              url \"{base_url}/srt-download-macos-arm64\"
-              sha256 \"{sha256_arm64}\"
-            else
-              url \"{base_url}/srt-download-macos-x64\"
-              sha256 \"{sha256_x64}\"
-            end
+            url \"{base_url}/srt-download-macos-arm64\"
+            sha256 \"{sha256_arm64}\"
           end
 
           def install
-            bin.install Dir[\"srt-download-macos-*\"].first => \"srt-download\"
+            bin.install \"srt-download-macos-arm64\" => \"srt-download\"
           end
 
           def caveats
@@ -72,7 +70,6 @@ def main() -> int:
             tag=args.tag,
             version=args.version,
             sha256_arm64=args.sha256_arm64,
-            sha256_x64=args.sha256_x64,
         ),
         encoding="utf-8",
     )

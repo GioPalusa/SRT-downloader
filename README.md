@@ -199,8 +199,10 @@ That produces:
 GitHub Actions now builds:
 
 - Python packages on Ubuntu
-- macOS standalone binaries for Intel and Apple Silicon
+- macOS standalone binaries for Apple Silicon
 - Windows standalone binaries for x64
+
+Intel Macs are not covered by the standalone binary or Homebrew formula; use the pipx install instead.
 
 Tagged releases can also publish to package managers:
 
