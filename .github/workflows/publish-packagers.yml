@@ -1,0 +1,172 @@
+name: publish-package-managers
+
+on:
+  release:
+    types:
+      - published
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Release tag to publish, for example v0.1.0
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  publish-homebrew:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check Homebrew tap credentials
+        id: gate
+        env:
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+        run: |
+          if [ -z "$HOMEBREW_TAP_GITHUB_TOKEN" ]; then
+            echo "::notice::HOMEBREW_TAP_GITHUB_TOKEN not configured; skipping Homebrew publish."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check out project repository
+        if: steps.gate.outputs.enabled == 'true'
+        uses: actions/checkout@v4
+
+      - name: Resolve Homebrew release metadata
+        if: steps.gate.outputs.enabled == 'true'
+        id: metadata
+        env:
+          RELEASE_EVENT_TAG: ${{ github.event.release.tag_name }}
+          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+          TAP_REPOSITORY_VAR: ${{ vars.HOMEBREW_TAP_REPOSITORY }}
+        run: |
+          release_tag="$RELEASE_EVENT_TAG"
+          if [ -n "$INPUT_RELEASE_TAG" ]; then
+            release_tag="$INPUT_RELEASE_TAG"
+          fi
+          if [ -z "$release_tag" ]; then
+            echo "A release tag is required to publish the Homebrew formula." >&2
+            exit 1
+          fi
+
+          tap_repository="$TAP_REPOSITORY_VAR"
+          if [ -z "$tap_repository" ]; then
+            tap_repository="${GITHUB_REPOSITORY%%/*}/homebrew-tap"
+          fi
+
+          echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
+          echo "version=${release_tag#v}" >> "$GITHUB_OUTPUT"
+          echo "tap_repository=$tap_repository" >> "$GITHUB_OUTPUT"
+
+      - name: Download macOS release assets
+        if: steps.gate.outputs.enabled == 'true'
+        env:
+          RELEASE_TAG: ${{ steps.metadata.outputs.release_tag }}
+        run: |
+          mkdir -p release-assets
+          base_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}"
+          curl -fsSL "$base_url/srt-download-macos-arm64" -o release-assets/srt-download-macos-arm64
+          curl -fsSL "$base_url/srt-download-macos-x64" -o release-assets/srt-download-macos-x64
+
+      - name: Compute Homebrew checksums
+        if: steps.gate.outputs.enabled == 'true'
+        id: checksums
+        run: |
+          echo "arm64=$(shasum -a 256 release-assets/srt-download-macos-arm64 | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          echo "x64=$(shasum -a 256 release-assets/srt-download-macos-x64 | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+
+      - name: Check out Homebrew tap
+        if: steps.gate.outputs.enabled == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.metadata.outputs.tap_repository }}
+          token: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          path: homebrew-tap
+
+      - name: Render Homebrew formula
+        if: steps.gate.outputs.enabled == 'true'
+        run: |
+          python3 .github/scripts/render_homebrew_formula.py \
+            --output homebrew-tap/Formula/srt-download.rb \
+            --repository "${GITHUB_REPOSITORY}" \
+            --tag "${{ steps.metadata.outputs.release_tag }}" \
+            --version "${{ steps.metadata.outputs.version }}" \
+            --sha256-arm64 "${{ steps.checksums.outputs.arm64 }}" \
+            --sha256-x64 "${{ steps.checksums.outputs.x64 }}"
+
+      - name: Commit and push formula update
+        if: steps.gate.outputs.enabled == 'true'
+        working-directory: homebrew-tap
+        env:
+          VERSION: ${{ steps.metadata.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git diff --quiet -- Formula/srt-download.rb; then
+            echo "Formula already up to date."
+            exit 0
+          fi
+
+          git add Formula/srt-download.rb
+          git commit -m "Update srt-download to ${VERSION}"
+          git push
+
+  publish-winget:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check WinGet credentials
+        id: gate
+        env:
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        run: |
+          if [ -z "$WINGET_TOKEN" ]; then
+            echo "::notice::WINGET_TOKEN not configured; skipping WinGet publish."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Resolve WinGet release metadata
+        if: steps.gate.outputs.enabled == 'true'
+        id: metadata
+        env:
+          RELEASE_EVENT_TAG: ${{ github.event.release.tag_name }}
+          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+          WINGET_FORK_USER_VAR: ${{ vars.WINGET_FORK_USER }}
+          WINGET_IDENTIFIER_VAR: ${{ vars.WINGET_PACKAGE_IDENTIFIER }}
+        run: |
+          release_tag="$RELEASE_EVENT_TAG"
+          if [ -n "$INPUT_RELEASE_TAG" ]; then
+            release_tag="$INPUT_RELEASE_TAG"
+          fi
+          if [ -z "$release_tag" ]; then
+            echo "A release tag is required to publish to WinGet." >&2
+            exit 1
+          fi
+          fork_user="$WINGET_FORK_USER_VAR"
+          if [ -z "$fork_user" ]; then
+            fork_user="${GITHUB_REPOSITORY%%/*}"
+          fi
+          package_identifier="$WINGET_IDENTIFIER_VAR"
+          if [ -z "$package_identifier" ]; then
+            package_identifier="GioPalusa.SRTDownloader"
+          fi
+          echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
+          echo "fork_user=$fork_user" >> "$GITHUB_OUTPUT"
+          echo "package_identifier=$package_identifier" >> "$GITHUB_OUTPUT"
+
+      - name: Publish release to WinGet
+        if: steps.gate.outputs.enabled == 'true'
+        uses: vedantmgoyal9/winget-releaser@v2
+        with:
+          identifier: ${{ steps.metadata.outputs.package_identifier }}
+          fork-user: ${{ steps.metadata.outputs.fork_user }}
+          installers-regex: '\.exe$'
+          max-versions-to-keep: 5
+          release-tag: ${{ steps.metadata.outputs.release_tag }}
+          token: ${{ secrets.WINGET_TOKEN }}

@@ -6,11 +6,15 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules, copy
 babelfish_datas = collect_data_files('babelfish') + copy_metadata('babelfish')
 babelfish_hiddenimports = collect_submodules('babelfish.converters')
 
+# Ship the project's own dist-info so importlib.metadata.version("srt-downloader")
+# resolves at runtime inside the PyInstaller-bundled binary.
+project_metadata = copy_metadata('srt-downloader')
+
 a = Analysis(
     ['fetch_srt_subtitles.py'],
     pathex=[],
     binaries=[],
-    datas=babelfish_datas,
+    datas=babelfish_datas + project_metadata,
     hiddenimports=['babelfish', 'yaml'] + babelfish_hiddenimports,
     hookspath=[],
     hooksconfig={},

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter, deque
+from importlib import metadata as importlib_metadata
 import json
 import logging
 import os
@@ -41,7 +42,14 @@ DEFAULT_CONFIG_FILES = [
     ".srt-downloader.yaml",
 ]
 
-APP_VERSION = "0.1.0"
+def _resolve_app_version() -> str:
+    try:
+        return importlib_metadata.version("srt-downloader")
+    except importlib_metadata.PackageNotFoundError:
+        return "0.0.0+source"
+
+
+APP_VERSION = _resolve_app_version()
 
 
 @dataclass
