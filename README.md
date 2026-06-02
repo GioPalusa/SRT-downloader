@@ -8,6 +8,8 @@ The tool scans a folder tree, finds video files, searches subtitle providers, an
 
 ## Install
 
+> The standalone macOS binary and the Homebrew formula are built for **Apple Silicon only**. On an Intel Mac, use the [Python install](#python-install-alternative) instead.
+
 ### Homebrew (macOS)
 
 ```bash
@@ -20,7 +22,7 @@ brew install GioPalusa/homebrew-tap/srt-download
 curl -fsSL https://raw.githubusercontent.com/GioPalusa/SRT-downloader/main/install.sh | sh
 ```
 
-The installer downloads the latest GitHub release binary for your Mac, installs it as `srt-download`, strips the Gatekeeper quarantine flag so the first run is not blocked, and adds the install directory to your `PATH` when needed.
+The installer downloads the latest GitHub release binary for your Apple Silicon Mac, installs it as `srt-download`, strips the Gatekeeper quarantine flag so the first run is not blocked, and adds the install directory to your `PATH` when needed.
 
 Pin a specific version or change the install location with environment variables:
 
@@ -34,6 +36,8 @@ SRT_DOWNLOADER_INSTALL_DIR="$HOME/bin" curl -fsSL https://raw.githubusercontent.
 ```powershell
 winget install GioPalusa.SRTDownloader
 ```
+
+> Pending acceptance into the [WinGet Community Repository](https://github.com/microsoft/winget-pkgs). Until the package is merged, use the [Direct Windows Installer](#direct-windows-installer) below.
 
 ### Direct Windows Installer
 
