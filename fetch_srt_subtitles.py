@@ -786,7 +786,19 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
 
-    root = Path(runtime["path"]).expanduser().resolve()
+    try:
+        root = Path(runtime["path"]).expanduser().resolve()
+    except OSError as exc:
+        # Resolving a relative path (the default ".") calls os.getcwd(), which
+        # raises if the working directory no longer exists — e.g. a network
+        # share that disconnected while the shell was still inside it.
+        print(
+            f"Cannot access the scan path '{runtime['path']}': {exc}.\n"
+            "If you were in a network folder that disconnected, reconnect it "
+            "or cd to a directory that exists and try again.",
+            file=sys.stderr,
+        )
+        return 2
     if not root.exists() or not root.is_dir():
         print(f"Scan path does not exist or is not a directory: {root}", file=sys.stderr)
         return 2
