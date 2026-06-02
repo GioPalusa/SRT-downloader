@@ -17,6 +17,7 @@ import yaml
 from babelfish import Language
 from subliminal import VIDEO_EXTENSIONS, download_best_subtitles, region, save_subtitles, scan_video
 from subliminal.exceptions import GuessingError, ProviderError
+from requests.exceptions import RequestException
 
 try:
     from rich.console import Console, Group
@@ -451,7 +452,11 @@ def configure_logging(verbose: bool) -> None:
 
     if not verbose:
         # Keep provider/library chatter out of the live UI in normal mode.
-        logging.getLogger("subliminal").setLevel(logging.ERROR)
+        # subliminal logs routine provider failures (a dead host, a 404, a
+        # timeout) with logger.exception(), i.e. full tracebacks at ERROR
+        # level. Those are expected and we already report them in the summary,
+        # so silence them below CRITICAL here. Use --verbose to see them.
+        logging.getLogger("subliminal").setLevel(logging.CRITICAL)
         logging.getLogger("guessit").setLevel(logging.ERROR)
         logging.getLogger("babelfish").setLevel(logging.ERROR)
 
@@ -595,6 +600,9 @@ def try_download_for_language(
         except ProviderError as exc:
             logging.warning("Provider error while processing %s: %s", video.name, exc)
             return ("failed", None)
+        except RequestException as exc:
+            logging.warning("Network error reaching a provider for %s: %s", video.name, exc)
+            return ("failed", None)
         except Exception as exc:  # pragma: no cover - keep the batch running on unexpected provider failures
             logging.exception("Unexpected error while processing %s", video.name)
             logging.debug("Unexpected exception details: %s", exc)
@@ -641,6 +649,12 @@ def try_download_for_language(
             logging.warning("Provider %s error while processing %s: %s", provider, video.name, exc)
             if progress_cb is not None:
                 progress_cb(f"provider {provider} failed, trying next")
+            continue
+        except RequestException as exc:
+            had_errors = True
+            logging.warning("Network error reaching provider %s for %s: %s", provider, video.name, exc)
+            if progress_cb is not None:
+                progress_cb(f"provider {provider} unreachable, trying next")
             continue
         except Exception as exc:  # pragma: no cover - keep the batch running on unexpected provider failures
             had_errors = True
