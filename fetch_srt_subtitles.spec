@@ -20,6 +20,12 @@ for package in ("subliminal", "babelfish", "guessit", "rebulk", "dogpile"):
 for dist in ("subliminal", "babelfish", "guessit", "srt-downloader"):
     datas += copy_metadata(dist)
 
+# dogpile's dbm cache backend goes through Python's stdlib `dbm`, which picks
+# a clone (gnu/ndbm/dumb) lazily at runtime. PyInstaller misses them, and on
+# Windows none get bundled -> "no dbm clone found". dbm.dumb is pure Python and
+# available everywhere, so it guarantees a working fallback on every platform.
+hiddenimports += ['dbm', 'dbm.dumb', 'dbm.ndbm', 'dbm.gnu']
+
 a = Analysis(
     ['fetch_srt_subtitles.py'],
     pathex=[],
