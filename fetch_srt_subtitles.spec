@@ -1,21 +1,31 @@
 # -*- mode: python ; coding: utf-8 -*-
 
-from PyInstaller.utils.hooks import collect_data_files, collect_submodules, copy_metadata
+from PyInstaller.utils.hooks import collect_all, copy_metadata
 
+datas = []
+binaries = []
+hiddenimports = ['yaml']
 
-babelfish_datas = collect_data_files('babelfish') + copy_metadata('babelfish')
-babelfish_hiddenimports = collect_submodules('babelfish.converters')
+# subliminal loads providers/refiners and dogpile loads its cache backends
+# lazily by string name (via entry points / importlib), so PyInstaller's
+# static analysis misses them. collect_all pulls in every submodule and data
+# file for these packages; copy_metadata ships the dist-info so the runtime
+# entry-point lookups (subliminal.providers, subliminal.refiners) resolve.
+for package in ("subliminal", "babelfish", "guessit", "rebulk", "dogpile"):
+    pkg_datas, pkg_binaries, pkg_hiddenimports = collect_all(package)
+    datas += pkg_datas
+    binaries += pkg_binaries
+    hiddenimports += pkg_hiddenimports
 
-# Ship the project's own dist-info so importlib.metadata.version("srt-downloader")
-# resolves at runtime inside the PyInstaller-bundled binary.
-project_metadata = copy_metadata('srt-downloader')
+for dist in ("subliminal", "babelfish", "guessit", "srt-downloader"):
+    datas += copy_metadata(dist)
 
 a = Analysis(
     ['fetch_srt_subtitles.py'],
     pathex=[],
-    binaries=[],
-    datas=babelfish_datas + project_metadata,
-    hiddenimports=['babelfish', 'yaml'] + babelfish_hiddenimports,
+    binaries=binaries,
+    datas=datas,
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
