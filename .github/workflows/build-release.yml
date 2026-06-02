@@ -37,11 +37,16 @@ jobs:
         run: |
           python -m pip install --force-reinstall dist/*.whl
           srt-download --version
-          # Real scan: exercises cache config, provider/refiner loading and
-          # guessit parsing. Exits 0 even when nothing is found, so it only
-          # fails on an actual crash (e.g. a missing bundled module).
+          # Real scan: exercises cache config, provider/refiner loading,
+          # guessit parsing, bracket filenames, multi-episode files and the
+          # resume ledger. Exits 0 even when nothing is found, so it only fails
+          # on an actual crash (missing module, list/int bug, glob bug, etc.).
           mkdir -p smoketest
           touch "smoketest/Some.Show.S01E01.1080p.mkv"
+          touch "smoketest/Movie [1080p] (2020).mkv"
+          touch "smoketest/Pack.S01E01E02.mkv"
+          srt-download --language sv smoketest
+          # Second run exercises the resume ledger (skip recently checked).
           srt-download --language sv smoketest
 
       - name: Upload Python distributions
@@ -89,12 +94,17 @@ jobs:
         shell: bash
         run: |
           ./dist/${{ matrix.executable_name }} --version
-          # Real scan over a dummy video so the frozen binary actually loads
-          # the dogpile cache backend, subliminal providers/refiners and
-          # guessit data. Catches missing-module bundling regressions that
+          # Real scan over dummy videos so the frozen binary actually loads the
+          # dogpile cache backend, subliminal providers/refiners and guessit
+          # data, and exercises bracket filenames, multi-episode parsing and
+          # the resume ledger. Catches bundling/logic regressions that
           # --version alone never would.
           mkdir -p smoketest
           touch "smoketest/Some.Show.S01E01.1080p.mkv"
+          touch "smoketest/Movie [1080p] (2020).mkv"
+          touch "smoketest/Pack.S01E01E02.mkv"
+          ./dist/${{ matrix.executable_name }} --language sv smoketest
+          # Second run exercises the resume ledger (skip recently checked).
           ./dist/${{ matrix.executable_name }} --language sv smoketest
 
       - name: Rename release asset

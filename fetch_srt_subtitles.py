@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter, deque
+import dbm
 from importlib import metadata as importlib_metadata
 import json
 import logging
 import os
 import sys
+import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -51,6 +54,7 @@ def _resolve_app_version() -> str:
 
 
 APP_VERSION = _resolve_app_version()
+ISSUES_URL = "https://github.com/GioPalusa/SRT-downloader/issues"
 
 
 @dataclass
@@ -58,6 +62,7 @@ class RunStats:
     scanned: int = 0
     downloaded: int = 0
     skipped_existing: int = 0
+    skipped_recent: int = 0
     not_found: int = 0
     failed: int = 0
     provider_downloads: Counter[str] = field(default_factory=Counter)
@@ -114,6 +119,7 @@ class StatusUI:
             f"Videos scanned: {stats.scanned}",
             f"Subtitles downloaded: {stats.downloaded}",
             f"Skipped existing: {stats.skipped_existing}",
+            f"Skipped (recently checked): {stats.skipped_recent}",
             f"Not found: {stats.not_found}",
             f"Failed: {stats.failed}",
         ]
@@ -235,6 +241,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=None,
         help="Use only explicitly selected and credentialed providers. Skip public fallback providers.",
+    )
+    parser.add_argument(
+        "--clean",
+        action="store_true",
+        help=(
+            "Ignore and reset the saved progress, re-searching every video from scratch. "
+            "By default the tool resumes, skipping videos already resolved or recently not found."
+        ),
+    )
+    parser.add_argument(
+        "--recheck-after",
+        type=float,
+        default=None,
+        metavar="DAYS",
+        help=(
+            "How many days before a previously not-found video is searched again. "
+            "Default: 14."
+        ),
     )
     parser.add_argument(
         "--list-providers",
@@ -361,8 +385,23 @@ def resolve_runtime_options(args: argparse.Namespace, config: dict[str, Any]) ->
         ),
         "verbose": bool(first_defined(args.verbose, config.get("verbose"), False)),
         "encoding": str(first_defined(args.encoding, config.get("encoding"), "utf-8")),
+        "clean": bool(getattr(args, "clean", False)),
+        "recheck_after_days": _coerce_positive_float(
+            first_defined(args.recheck_after, config.get("recheck_after_days"), 14.0),
+            "recheck_after_days",
+        ),
     }
     return runtime
+
+
+def _coerce_positive_float(value: Any, key_name: str) -> float:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"Config key '{key_name}' must be a number.")
+    if result < 0:
+        raise ValueError(f"Config key '{key_name}' must not be negative.")
+    return result
 
 
 def merge_provider_configs(config_provider_configs: dict[str, dict[str, str]]) -> dict[str, dict[str, str]]:
@@ -430,10 +469,14 @@ def print_effective_config(
     provider_configs: dict[str, dict[str, str]],
     providers: list[str],
 ) -> None:
+    try:
+        resolved_path = str(Path(runtime["path"]).expanduser().resolve())
+    except OSError:
+        resolved_path = runtime["path"]
     effective = {
         "version": APP_VERSION,
         "config_file": str(config_path.resolve()) if config_path is not None else None,
-        "path": str(Path(runtime["path"]).expanduser().resolve()),
+        "path": resolved_path,
         "languages": runtime["languages"],
         "encoding": runtime["encoding"],
         "verbose": runtime["verbose"],
@@ -442,6 +485,8 @@ def print_effective_config(
         "selected_providers": runtime["providers"],
         "credentialed_providers": sorted(provider_configs.keys()),
         "effective_providers": providers,
+        "clean": runtime["clean"],
+        "recheck_after_days": runtime["recheck_after_days"],
     }
     print(json.dumps(effective, indent=2, sort_keys=True))
 
@@ -461,17 +506,180 @@ def configure_logging(verbose: bool) -> None:
         logging.getLogger("babelfish").setLevel(logging.ERROR)
 
 
-def configure_cache(root: Path) -> None:
-    cache_dir = root / ".subtitle-cache"
-    cache_dir.mkdir(exist_ok=True)
-    region.configure("dogpile.cache.dbm", arguments={"filename": str(cache_dir / "cache.dbm")})
+def _dir_is_writable(directory: Path) -> bool:
+    probe = directory / ".srt-write-test"
+    try:
+        with probe.open("w") as handle:
+            handle.write("ok")
+        probe.unlink()
+        return True
+    except OSError:
+        return False
+
+
+def _repair_dbm_cache(db_path: Path) -> None:
+    # A dbm file left half-written by a killed run raises on the next open and
+    # would otherwise wedge every future run. Validate it; if it is corrupt,
+    # remove the cache files so a fresh one is created.
+    try:
+        handle = dbm.open(str(db_path), "c")
+        handle.close()
+        return
+    except Exception:
+        for leftover in db_path.parent.glob(db_path.name + "*"):
+            try:
+                leftover.unlink()
+            except OSError:
+                pass
+
+
+def configure_cache(root: Path) -> Path:
+    """Configure the subtitle cache, returning the directory actually used.
+
+    Prefers a ``.subtitle-cache`` directory inside the scan root. Falls back to
+    a temp directory when the root is not writable (e.g. a read-only share),
+    and to an in-memory cache as a last resort, so a scan never fails just
+    because it cannot persist its cache.
+    """
+    candidates = [root / ".subtitle-cache", Path(tempfile.gettempdir()) / "srt-downloader-cache"]
+    for cache_dir in candidates:
+        try:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            continue
+        if not _dir_is_writable(cache_dir):
+            continue
+        db_path = cache_dir / "cache.dbm"
+        _repair_dbm_cache(db_path)
+        region.configure("dogpile.cache.dbm", arguments={"filename": str(db_path)})
+        if cache_dir != candidates[0]:
+            logging.warning("Scan root is not writable; using cache at %s", cache_dir)
+        return cache_dir
+
+    # Nothing writable anywhere: keep working with a process-local cache.
+    logging.warning("No writable cache location found; using an in-memory cache.")
+    region.configure("dogpile.cache.memory")
+    return candidates[0]
+
+
+LEDGER_VERSION = 1
+
+
+class ProgressLedger:
+    """Tracks per-video, per-language outcomes so an aborted or repeated run
+    can skip work it already did instead of re-searching every file.
+
+    Keyed by absolute path plus size and mtime, so a file that changes on disk
+    is re-evaluated. ``downloaded``/``exists`` are always skipped; ``not_found``
+    is skipped only until ``recheck_after`` elapses (subtitles may appear
+    later); ``failed`` is never cached, since failures are usually transient.
+    """
+
+    def __init__(self, path: Path | None, recheck_after_seconds: float, reset: bool = False) -> None:
+        self.path = path
+        self.recheck_after = recheck_after_seconds
+        self.dirty = False
+        self._entries: dict[str, dict[str, Any]] = {}
+        if reset:
+            # --clean: discard any saved progress and start fresh.
+            if self.path is not None:
+                try:
+                    self.path.unlink()
+                except OSError:
+                    pass
+        else:
+            self._load()
+
+    def _load(self) -> None:
+        if self.path is None or not self.path.exists():
+            return
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if isinstance(data, dict) and data.get("version") == LEDGER_VERSION:
+            entries = data.get("entries")
+            if isinstance(entries, dict):
+                self._entries = entries
+
+    @staticmethod
+    def _stat(video_path: Path) -> tuple[int | None, int | None]:
+        try:
+            st = video_path.stat()
+            return int(st.st_size), int(st.st_mtime)
+        except OSError:
+            return (None, None)
+
+    def _valid_entry(self, video_path: Path) -> dict[str, Any] | None:
+        entry = self._entries.get(str(video_path))
+        if entry is None:
+            return None
+        size, mtime = self._stat(video_path)
+        if entry.get("size") != size or entry.get("mtime") != mtime:
+            # File changed since we recorded it; drop the stale entry.
+            self._entries.pop(str(video_path), None)
+            self.dirty = True
+            return None
+        return entry
+
+    def should_skip(self, video_path: Path, language_code: str) -> bool:
+        entry = self._valid_entry(video_path)
+        if not entry:
+            return False
+        lang = entry.get("languages", {}).get(language_code)
+        if not lang:
+            return False
+        status = lang.get("status")
+        if status in ("downloaded", "exists"):
+            return True
+        if status == "not_found":
+            return (time.time() - float(lang.get("ts", 0))) < self.recheck_after
+        return False
+
+    def record(self, video_path: Path, language_code: str, status: str) -> None:
+        size, mtime = self._stat(video_path)
+        entry = self._entries.get(str(video_path))
+        if entry is None or entry.get("size") != size or entry.get("mtime") != mtime:
+            entry = {"size": size, "mtime": mtime, "languages": {}}
+            self._entries[str(video_path)] = entry
+        entry["languages"][language_code] = {"status": status, "ts": int(time.time())}
+        self.dirty = True
+
+    def save(self, force: bool = False) -> None:
+        if self.path is None or (not self.dirty and not force):
+            return
+        payload = json.dumps({"version": LEDGER_VERSION, "entries": self._entries})
+        try:
+            tmp = self.path.with_name(self.path.name + ".tmp")
+            tmp.write_text(payload, encoding="utf-8")
+            tmp.replace(self.path)
+            self.dirty = False
+        except OSError as exc:
+            logging.debug("Could not save progress ledger: %s", exc)
 
 
 def iter_video_files(root: Path) -> Iterable[Path]:
     video_extensions = {extension.lower() for extension in VIDEO_EXTENSIONS}
-    for path in root.rglob("*"):
-        if path.is_file() and path.suffix.lower() in video_extensions:
-            yield path
+    # Manual walk (instead of rglob) so an unreadable directory or a file that
+    # vanishes mid-scan — e.g. a network share that disconnects — is skipped
+    # with a warning instead of crashing the whole run.
+    pending: list[Path] = [root]
+    while pending:
+        directory = pending.pop()
+        try:
+            entries = list(directory.iterdir())
+        except OSError as exc:
+            logging.warning("Cannot read directory %s: %s", directory, exc)
+            continue
+        for path in entries:
+            try:
+                if path.is_dir():
+                    pending.append(path)
+                elif path.is_file() and path.suffix.lower() in video_extensions:
+                    yield path
+            except OSError as exc:
+                logging.warning("Cannot access %s: %s", path, exc)
+                continue
 
 
 def load_languages(language_codes: Iterable[str]) -> list[Language]:
@@ -512,7 +720,17 @@ def existing_subtitle_paths(video_path: Path) -> list[Path]:
     basename = video_path.stem
     results: list[Path] = []
 
-    for subtitle_path in video_path.parent.glob(f"{basename}*.srt"):
+    # Use iterdir + name comparison rather than glob: a stem containing glob
+    # metacharacters (e.g. "Show [1080p]") would otherwise be treated as a
+    # pattern and silently fail to match. Tolerate an unreadable directory.
+    try:
+        entries = list(video_path.parent.iterdir())
+    except OSError:
+        return []
+
+    for subtitle_path in entries:
+        if subtitle_path.suffix.lower() != ".srt":
+            continue
         name = subtitle_path.name
         if name == f"{basename}.srt" or name.startswith(f"{basename}."):
             results.append(subtitle_path)
@@ -520,9 +738,18 @@ def existing_subtitle_paths(video_path: Path) -> list[Path]:
     return sorted(results)
 
 
+def _language_code(language: Language) -> str:
+    # Most languages expose a 2-letter alpha2 code, but some only have a
+    # 3-letter code, in which case babelfish raises on .alpha2.
+    try:
+        return language.alpha2.lower()
+    except Exception:
+        return str(language).lower()
+
+
 def has_subtitle_for_language(video_path: Path, language: Language) -> bool:
     basename = video_path.stem.lower()
-    language_code = language.alpha2.lower()
+    language_code = _language_code(language)
 
     for subtitle_path in existing_subtitle_paths(video_path):
         name = subtitle_path.name.lower()
@@ -628,13 +855,17 @@ def try_download_for_language(
         if progress_cb is not None:
             progress_cb(f"saving subtitle from {provider_name}")
 
-        saved = save_subtitles(
-            save_target,
-            matches,
-            encoding=encoding,
-            subtitle_format="srt",
-            language_format="alpha2",
-        )
+        try:
+            saved = save_subtitles(
+                save_target,
+                matches,
+                encoding=encoding,
+                subtitle_format="srt",
+                language_format="alpha2",
+            )
+        except OSError as exc:
+            logging.warning("Could not save subtitle for %s: %s", video.name, exc)
+            return ("failed", None)
         if not saved:
             return ("failed", None)
 
@@ -686,13 +917,18 @@ def try_download_for_language(
         if progress_cb is not None:
             progress_cb(f"saving subtitle from {provider_name}")
 
-        saved = save_subtitles(
-            save_target,
-            matches,
-            encoding=encoding,
-            subtitle_format="srt",
-            language_format="alpha2",
-        )
+        try:
+            saved = save_subtitles(
+                save_target,
+                matches,
+                encoding=encoding,
+                subtitle_format="srt",
+                language_format="alpha2",
+            )
+        except OSError as exc:
+            had_errors = True
+            logging.warning("Could not save subtitle for %s: %s", video.name, exc)
+            continue
         if saved:
             return ("downloaded", provider_name)
 
@@ -708,6 +944,7 @@ def fetch_subtitle_for_video(
     provider_configs: dict[str, dict[str, str]],
     encoding: str,
     detailed_progress: bool,
+    ledger: "ProgressLedger | None" = None,
     progress_cb: Callable[[str], None] | None = None,
 ) -> tuple[str, Language | None, str | None]:
     try:
@@ -722,12 +959,27 @@ def fetch_subtitle_for_video(
 
     keyword_video = build_keyword_query_video(video)
     had_errors = False
+    searched_any = False
+    skipped_recent = False
 
     for language in languages:
+        language_code = _language_code(language)
+
         if has_subtitle_for_language(video_path, language):
+            if ledger is not None:
+                ledger.record(video_path, language_code, "exists")
             if progress_cb is not None:
                 progress_cb(f"subtitle already exists for {language}")
             return ("exists", language, None)
+
+        if ledger is not None and ledger.should_skip(video_path, language_code):
+            skipped_recent = True
+            if progress_cb is not None:
+                progress_cb(f"recently checked {language}, skipping")
+            continue
+
+        searched_any = True
+        language_failed = False
 
         status, provider_name = try_download_for_language(
             video,
@@ -740,30 +992,45 @@ def fetch_subtitle_for_video(
             progress_cb=progress_cb,
         )
         if status == "downloaded":
+            if ledger is not None:
+                ledger.record(video_path, language_code, "downloaded")
             return ("downloaded", language, provider_name)
         if status == "failed":
+            language_failed = True
+
+        if keyword_video is not None:
+            status, provider_name = try_download_for_language(
+                keyword_video,
+                language,
+                providers,
+                provider_configs,
+                encoding,
+                detailed_progress,
+                query_label="keyword fallback",
+                save_video=video,
+                progress_cb=progress_cb,
+            )
+            if status == "downloaded":
+                if ledger is not None:
+                    ledger.record(video_path, language_code, "downloaded")
+                return ("downloaded", language, provider_name)
+            if status == "failed":
+                language_failed = True
+
+        if language_failed:
             had_errors = True
+            # Don't cache failures: they are usually transient (a provider was
+            # down), so the language should be retried on the next run.
+        elif ledger is not None:
+            ledger.record(video_path, language_code, "not_found")
 
-        if keyword_video is None:
-            continue
-
-        status, provider_name = try_download_for_language(
-            keyword_video,
-            language,
-            providers,
-            provider_configs,
-            encoding,
-            detailed_progress,
-            query_label="keyword fallback",
-            save_video=video,
-            progress_cb=progress_cb,
-        )
-        if status == "downloaded":
-            return ("downloaded", language, provider_name)
-        if status == "failed":
-            had_errors = True
-
-    return ("failed", None, None) if had_errors else ("not_found", None, None)
+    if had_errors:
+        return ("failed", None, None)
+    if searched_any:
+        return ("not_found", None, None)
+    if skipped_recent:
+        return ("skipped_recent", None, None)
+    return ("not_found", None, None)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -815,7 +1082,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Scan path does not exist or is not a directory: {root}", file=sys.stderr)
         return 2
 
-    configure_cache(root)
+    cache_dir = configure_cache(root)
+    ledger = ProgressLedger(
+        path=cache_dir / "progress.json",
+        recheck_after_seconds=runtime["recheck_after_days"] * 86400,
+        reset=runtime["clean"],
+    )
 
     ui = StatusUI(enabled=not runtime["verbose"])
     ui.print_splash(root, languages, providers)
@@ -839,8 +1111,14 @@ def main(argv: list[str] | None = None) -> int:
                 provider_configs=provider_configs,
                 encoding=runtime["encoding"],
                 detailed_progress=runtime["detailed_progress"],
+                ledger=ledger,
                 progress_cb=set_detail,
             )
+
+            # Persist progress periodically so an abort or crash mid-run keeps
+            # most of the work already done.
+            if stats.scanned % 25 == 0:
+                ledger.save()
 
             if result == "downloaded":
                 stats.downloaded += 1
@@ -856,6 +1134,10 @@ def main(argv: list[str] | None = None) -> int:
                 stats.skipped_existing += 1
                 ui.add_result(f"skipped {video_path.name}")
                 ui.update(current_line, stats, detail_text="completed: skipped")
+            elif result == "skipped_recent":
+                stats.skipped_recent += 1
+                ui.add_result(f"skipped {video_path.name} (checked recently)")
+                ui.update(current_line, stats, detail_text="completed: skipped (recent)")
             elif result == "not_found":
                 stats.not_found += 1
                 ui.add_result(f"not found {video_path.name}")
@@ -868,6 +1150,8 @@ def main(argv: list[str] | None = None) -> int:
         interrupted = True
         ui.update("Interrupted by user. Cleaning up...", stats, detail_text="cancelled by user")
     finally:
+        # Always flush progress so a Ctrl+C or unexpected error still resumes.
+        ledger.save(force=True)
         ui.stop()
 
     print()
@@ -878,5 +1162,24 @@ def main(argv: list[str] | None = None) -> int:
     return 0 if stats.failed == 0 else 1
 
 
+def run() -> int:
+    try:
+        return main()
+    except KeyboardInterrupt:
+        # main handles Ctrl+C during the scan; this guards the setup phase too.
+        return 130
+    except Exception:
+        import traceback
+
+        print(
+            "\nSRT Downloader hit an unexpected error and had to stop.\n"
+            f"This is a bug — please report it at:\n  {ISSUES_URL}\n"
+            "Include the command you ran and the details below:\n",
+            file=sys.stderr,
+        )
+        traceback.print_exc()
+        return 70  # EX_SOFTWARE
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(run())

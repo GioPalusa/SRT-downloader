@@ -120,10 +120,33 @@ Useful options:
 - `-p, --provider NAME` Prioritize one or more providers. Repeat the flag to set order.
 - `--only-selected-providers` Disable public fallback providers.
 - `--config /path/to/srt-downloader.yaml` Load settings from a YAML config file.
+- `--clean` Ignore and reset saved progress; re-search every video from scratch.
+- `--recheck-after DAYS` Days before a previously not-found video is searched again (default 14).
 - `--list-providers` Print the final provider order and exit.
 - `--print-effective-config` Print merged runtime settings and exit.
 - `--verbose` Enable debug logging.
 - `--version` Print the current version.
+
+## Resuming Interrupted Runs
+
+Scanning a large library can take a while, so the tool keeps a progress ledger
+(`.subtitle-cache/progress.json` inside the scan folder). For each video it
+records, per language, whether a subtitle was downloaded, already existed, or
+was not found.
+
+On the next run it skips:
+
+- videos whose subtitles already exist, and
+- videos that were **not found** within the last `--recheck-after` days (14 by default).
+
+So if a run is interrupted (`Ctrl+C`, a crash, or a disconnected drive), just
+run the same command again — it picks up roughly where it left off instead of
+re-searching everything. Failures (a provider being down) are never cached, so
+those are always retried.
+
+Use `--clean` to reset saved progress and re-search everything from scratch
+(equivalent to deleting `.subtitle-cache`). If the scan folder is read-only,
+the cache falls back to a temporary directory automatically.
 
 Run full help:
 
@@ -155,6 +178,7 @@ only_selected_providers: false
 detailed_progress: false
 verbose: false
 encoding: utf-8
+recheck_after_days: 14
 ```
 
 CLI flags override config values.
@@ -233,5 +257,6 @@ Tagging a release like `vX.Y.Z` publishes those artifacts to GitHub Releases, wh
 - If you want strict provider control, combine `-p` with `--only-selected-providers`.
 - If you need to inspect provider order before scanning, run `srt-download --list-providers`.
 - Press `Ctrl+C` to stop safely. The tool exits cleanly and prints a partial summary.
+- If you hit an unexpected error, the tool prints a report link. Please file it at [the issue tracker](https://github.com/GioPalusa/SRT-downloader/issues) with the command you ran and the printed details.
 - macOS blocks the binary with "cannot be opened because the developer cannot be verified" if you downloaded it manually instead of through the installer. Clear the quarantine flag with `xattr -d com.apple.quarantine /path/to/srt-download`.
 - Windows SmartScreen warning on first run is expected for unsigned binaries. The installer calls `Unblock-File`; if you downloaded the exe manually, right-click the file > Properties > tick **Unblock**, then re-run.

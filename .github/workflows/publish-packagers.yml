@@ -10,6 +10,11 @@ on:
         description: Release tag to publish, for example v0.1.0
         required: true
         type: string
+      publish_winget:
+        description: Publish to WinGet (uncheck to skip, e.g. while a submission is under review)
+        required: false
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -122,8 +127,12 @@ jobs:
         id: gate
         env:
           WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+          PUBLISH_WINGET: ${{ inputs.publish_winget }}
         run: |
-          if [ -z "$WINGET_TOKEN" ]; then
+          if [ "$PUBLISH_WINGET" = "false" ]; then
+            echo "::notice::WinGet publish skipped via workflow input."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          elif [ -z "$WINGET_TOKEN" ]; then
             echo "::notice::WINGET_TOKEN not configured; skipping WinGet publish."
             echo "enabled=false" >> "$GITHUB_OUTPUT"
           else

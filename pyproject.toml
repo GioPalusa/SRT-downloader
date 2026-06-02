@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "srt-downloader"
-version = "0.1.4"
+version = "0.1.5"
 description = "Download subtitles for local video files recursively."
 readme = "README.md"
 license = "MIT"

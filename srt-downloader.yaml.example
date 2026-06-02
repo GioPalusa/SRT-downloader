@@ -32,3 +32,7 @@ verbose: false
 
 # Subtitle file encoding.
 encoding: utf-8
+
+# Days before a previously not-found video is searched again.
+# (Resume is always on; pass --clean on the command line to reset progress.)
+recheck_after_days: 14
