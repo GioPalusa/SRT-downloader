@@ -536,6 +536,18 @@ def has_subtitle_for_language(video_path: Path, language: Language) -> bool:
     return False
 
 
+def _first_int(value: Any) -> int | None:
+    # guessit can return a list for season/episode on multi-episode files
+    # (e.g. "S01E01E02" -> episode == [1, 2]). Take the first entry and fall
+    # back to None if it is not coercible to an int.
+    if isinstance(value, (list, tuple)):
+        value = value[0] if value else None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def build_keyword_query_video(video):
     video_cls = type(video)
     fromname = getattr(video_cls, "fromname", None)
@@ -545,10 +557,10 @@ def build_keyword_query_video(video):
     keyword_name: str | None = None
 
     series = getattr(video, "series", None)
-    season = getattr(video, "season", None)
-    episode = getattr(video, "episode", None)
+    season = _first_int(getattr(video, "season", None))
+    episode = _first_int(getattr(video, "episode", None))
     if series and season is not None and episode is not None:
-        keyword_name = f"{series} S{int(season):02d}E{int(episode):02d}"
+        keyword_name = f"{series} S{season:02d}E{episode:02d}"
     else:
         title = getattr(video, "title", None)
         year = getattr(video, "year", None)
