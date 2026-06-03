@@ -36,3 +36,12 @@ encoding: utf-8
 # Days before a previously not-found video is searched again.
 # (Resume is always on; pass --clean on the command line to reset progress.)
 recheck_after_days: 14
+
+# Number of videos to process in parallel (1 = sequential with detailed progress).
+jobs: 4
+
+# Minimum delay (seconds) between searches across workers, to stay polite.
+min_request_interval: 0
+
+# Auto-correct subtitle timing with ffsubsync after download (needs ffsubsync + ffmpeg).
+sync: false

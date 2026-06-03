@@ -119,6 +119,9 @@ Useful options:
 - `-l, --language sv` Set the primary language. English is added automatically as fallback.
 - `-p, --provider NAME` Prioritize one or more providers. Repeat the flag to set order.
 - `--only-selected-providers` Disable public fallback providers.
+- `-j, --jobs N` Process N videos in parallel (default 4; use 1 for sequential with detailed progress).
+- `--min-request-interval SECONDS` Minimum delay between searches across workers, to stay polite to providers.
+- `--sync` Auto-correct subtitle timing with ffsubsync after download (requires ffsubsync and ffmpeg on PATH).
 - `--config /path/to/srt-downloader.yaml` Load settings from a YAML config file.
 - `--clean` Ignore and reset saved progress; re-search every video from scratch.
 - `--recheck-after DAYS` Days before a previously not-found video is searched again (default 14).
@@ -179,6 +182,9 @@ detailed_progress: false
 verbose: false
 encoding: utf-8
 recheck_after_days: 14
+jobs: 4
+min_request_interval: 0
+sync: false
 ```
 
 CLI flags override config values.
@@ -250,6 +256,31 @@ Homebrew publishing expects a tap repository such as `GioPalusa/homebrew-tap` wi
 WinGet publishing uses `vedantmgoyal9/winget-releaser`, so you need a fork of `microsoft/winget-pkgs` under the same account and one accepted initial package submission before automatic updates can take over.
 
 Tagging a release like `vX.Y.Z` publishes those artifacts to GitHub Releases, which is what the one-line installers consume.
+
+### Code signing (optional)
+
+The standalone binaries are unsigned by default, which triggers macOS Gatekeeper
+and Windows SmartScreen prompts (the installers work around this). The release
+workflow includes **secret-gated** signing that activates only when the relevant
+secrets are present — without them, builds ship unsigned exactly as before.
+
+macOS (Developer ID + notarization, requires an Apple Developer account):
+
+- `APPLE_CERTIFICATE_P12` — base64 of your Developer ID Application `.p12`
+- `APPLE_CERTIFICATE_PASSWORD` — its export password
+- `APPLE_SIGNING_IDENTITY` — e.g. `Developer ID Application: Your Name (TEAMID)`
+- `APPLE_NOTARY_API_KEY` — base64 of your App Store Connect API key `.p8`
+- `APPLE_NOTARY_API_KEY_ID`, `APPLE_NOTARY_API_ISSUER` — that key's IDs
+
+Windows (Authenticode):
+
+- `WINDOWS_CERT_PFX_BASE64` — base64 of a code-signing `.pfx`
+- `WINDOWS_CERT_PASSWORD` — its password
+
+A bare macOS CLI binary can't be stapled (only bundles/`.pkg`/`.dmg`), so it is
+notarized for the online Gatekeeper check; wrapping it in a notarized+stapled
+`.pkg` is a possible future enhancement. For Windows OSS projects without a paid
+certificate, [SignPath Foundation](https://signpath.org) offers free signing.
 
 ## Troubleshooting
 

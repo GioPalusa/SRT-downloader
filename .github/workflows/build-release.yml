@@ -142,6 +142,90 @@ jobs:
           # Second run exercises the resume ledger (skip recently checked).
           ./dist/${{ matrix.executable_name }} --language sv smoketest
 
+      # --- Code signing (secret-gated; skipped entirely when secrets absent) ---
+      - name: Check macOS signing secrets
+        id: macsign
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          CERT: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          NOTARY_KEY: ${{ secrets.APPLE_NOTARY_API_KEY }}
+        run: |
+          if [ -n "$CERT" ] && [ -n "$NOTARY_KEY" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::macOS signing secrets not configured; shipping an unsigned binary."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Import Developer ID certificate (macOS)
+        if: runner.os == 'macOS' && steps.macsign.outputs.enabled == 'true'
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PW="$(openssl rand -base64 24)"
+          security create-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN"
+          echo "$APPLE_CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PW" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+
+      - name: Codesign and notarize (macOS)
+        if: runner.os == 'macOS' && steps.macsign.outputs.enabled == 'true'
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_NOTARY_API_KEY: ${{ secrets.APPLE_NOTARY_API_KEY }}
+          APPLE_NOTARY_API_KEY_ID: ${{ secrets.APPLE_NOTARY_API_KEY_ID }}
+          APPLE_NOTARY_API_ISSUER: ${{ secrets.APPLE_NOTARY_API_ISSUER }}
+        run: |
+          BIN="./dist/${{ matrix.executable_name }}"
+          codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$BIN"
+          codesign --verify --strict --verbose=2 "$BIN"
+          # A bare Mach-O CLI cannot be stapled (only bundles/pkg/dmg can), so we
+          # notarize for the online Gatekeeper check. For fully offline trust,
+          # wrap the binary in a notarized+stapled .pkg (future enhancement).
+          echo "$APPLE_NOTARY_API_KEY" | base64 --decode > "$RUNNER_TEMP/notary.p8"
+          ditto -c -k "$BIN" "$RUNNER_TEMP/notarize.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" \
+            --key "$RUNNER_TEMP/notary.p8" \
+            --key-id "$APPLE_NOTARY_API_KEY_ID" \
+            --issuer "$APPLE_NOTARY_API_ISSUER" \
+            --wait
+
+      - name: Check Windows signing secrets
+        id: winsign
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          PFX: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+        run: |
+          if [ -n "$PFX" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::Windows signing secrets not configured; shipping an unsigned exe."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Sign executable (Windows)
+        if: runner.os == 'Windows' && steps.winsign.outputs.enabled == 'true'
+        shell: pwsh
+        env:
+          WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP 'cert.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERT_PFX_BASE64))
+          $signtool = (Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe' |
+            Sort-Object FullName | Select-Object -Last 1).FullName
+          & $signtool sign /f $pfx /p $env:WINDOWS_CERT_PASSWORD /fd SHA256 `
+            /tr http://timestamp.digicert.com /td SHA256 "./dist/${{ matrix.executable_name }}"
+          & $signtool verify /pa "./dist/${{ matrix.executable_name }}"
+
       - name: Rename release asset
         shell: bash
         run: mv ./dist/${{ matrix.executable_name }} ./dist/${{ matrix.asset_name }}
