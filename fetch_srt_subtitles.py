@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import dbm
 import functools
+import itertools
 import json
 import logging
 import os
 import sys
 import tempfile
+import threading
 import time
 from collections import Counter, deque
 from collections.abc import Callable, Iterable
@@ -275,6 +278,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=("How many days before a previously not-found video is searched again. Default: 14."),
     )
     parser.add_argument(
+        "-j",
+        "--jobs",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Number of videos to process in parallel. Default: 4. Use 1 for fully "
+            "sequential processing with detailed per-provider progress."
+        ),
+    )
+    parser.add_argument(
+        "--min-request-interval",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "Minimum delay between subtitle searches across all workers, to stay "
+            "polite to providers. Default: 0 (rely on the worker count)."
+        ),
+    )
+    parser.add_argument(
         "--list-providers",
         action="store_true",
         help="Print provider selection details and exit.",
@@ -402,8 +426,21 @@ def resolve_runtime_options(args: argparse.Namespace, config: dict[str, Any]) ->
             first_defined(args.recheck_after, config.get("recheck_after_days"), 14.0),
             "recheck_after_days",
         ),
+        "jobs": _coerce_jobs(first_defined(args.jobs, config.get("jobs"), 4)),
+        "min_request_interval": _coerce_positive_float(
+            first_defined(args.min_request_interval, config.get("min_request_interval"), 0.0),
+            "min_request_interval",
+        ),
     }
     return runtime
+
+
+def _coerce_jobs(value: Any) -> int:
+    try:
+        jobs = int(value)
+    except (TypeError, ValueError):
+        raise ValueError("Config key 'jobs' must be an integer.") from None
+    return max(1, jobs)
 
 
 def _coerce_positive_float(value: Any, key_name: str) -> float:
@@ -666,6 +703,7 @@ class ProgressLedger:
         self.recheck_after = recheck_after_seconds
         self.dirty = False
         self._entries: dict[str, dict[str, Any]] = {}
+        self._lock = threading.RLock()  # guards _entries for concurrent workers
         if reset:
             # --clean: discard any saved progress and start fresh.
             if self.path is not None:
@@ -709,39 +747,68 @@ class ProgressLedger:
         return entry
 
     def should_skip(self, video_path: Path, language_code: str) -> bool:
-        entry = self._valid_entry(video_path)
-        if not entry:
+        with self._lock:
+            entry = self._valid_entry(video_path)
+            if not entry:
+                return False
+            lang = entry.get("languages", {}).get(language_code)
+            if not lang:
+                return False
+            status = lang.get("status")
+            if status in ("downloaded", "exists"):
+                return True
+            if status == "not_found":
+                return (time.time() - float(lang.get("ts", 0))) < self.recheck_after
             return False
-        lang = entry.get("languages", {}).get(language_code)
-        if not lang:
-            return False
-        status = lang.get("status")
-        if status in ("downloaded", "exists"):
-            return True
-        if status == "not_found":
-            return (time.time() - float(lang.get("ts", 0))) < self.recheck_after
-        return False
 
     def record(self, video_path: Path, language_code: str, status: str) -> None:
-        size, mtime = self._stat(video_path)
-        entry = self._entries.get(str(video_path))
-        if entry is None or entry.get("size") != size or entry.get("mtime") != mtime:
-            entry = {"size": size, "mtime": mtime, "languages": {}}
-            self._entries[str(video_path)] = entry
-        entry["languages"][language_code] = {"status": status, "ts": int(time.time())}
-        self.dirty = True
+        with self._lock:
+            size, mtime = self._stat(video_path)
+            entry = self._entries.get(str(video_path))
+            if entry is None or entry.get("size") != size or entry.get("mtime") != mtime:
+                entry = {"size": size, "mtime": mtime, "languages": {}}
+                self._entries[str(video_path)] = entry
+            entry["languages"][language_code] = {"status": status, "ts": int(time.time())}
+            self.dirty = True
 
     def save(self, force: bool = False) -> None:
-        if self.path is None or (not self.dirty and not force):
+        with self._lock:
+            if self.path is None or (not self.dirty and not force):
+                return
+            payload = json.dumps({"version": LEDGER_VERSION, "entries": self._entries})
+            try:
+                tmp = self.path.with_name(self.path.name + ".tmp")
+                tmp.write_text(payload, encoding="utf-8")
+                tmp.replace(self.path)
+                self.dirty = False
+            except OSError as exc:
+                logging.debug("Could not save progress ledger: %s", exc)
+
+
+class RateLimiter:
+    """Thread-safe minimum-interval throttle shared across worker threads.
+
+    ``wait()`` blocks until at least ``min_interval`` seconds have elapsed since
+    the previous call returned, pacing total request volume to keep providers
+    happy. ``min_interval <= 0`` disables it (the worker-pool size is then the
+    only throttle).
+    """
+
+    def __init__(self, min_interval: float) -> None:
+        self.min_interval = max(0.0, min_interval)
+        self._lock = threading.Lock()
+        self._next_allowed = 0.0
+
+    def wait(self) -> None:
+        if self.min_interval <= 0:
             return
-        payload = json.dumps({"version": LEDGER_VERSION, "entries": self._entries})
-        try:
-            tmp = self.path.with_name(self.path.name + ".tmp")
-            tmp.write_text(payload, encoding="utf-8")
-            tmp.replace(self.path)
-            self.dirty = False
-        except OSError as exc:
-            logging.debug("Could not save progress ledger: %s", exc)
+        with self._lock:
+            now = time.monotonic()
+            sleep_for = self._next_allowed - now
+            if sleep_for > 0:
+                time.sleep(sleep_for)
+                now = time.monotonic()
+            self._next_allowed = now + self.min_interval
 
 
 def iter_video_files(root: Path) -> Iterable[Path]:
@@ -1129,6 +1196,36 @@ def fetch_subtitle_for_video(
     return ("not_found", None, None)
 
 
+def _apply_result(
+    ui: StatusUI,
+    stats: RunStats,
+    video_path: Path,
+    result: str,
+    downloaded_language: Language | None,
+    provider_name: str | None,
+) -> None:
+    """Fold a single video's outcome into the run stats and recent-results UI."""
+    if result == "downloaded":
+        stats.downloaded += 1
+        if provider_name is not None:
+            stats.provider_downloads[provider_name] += 1
+            ui.add_result(f"downloaded {video_path.name} ({downloaded_language}) from {provider_name}")
+        else:
+            ui.add_result(f"downloaded {video_path.name} ({downloaded_language})")
+    elif result == "exists":
+        stats.skipped_existing += 1
+        ui.add_result(f"skipped {video_path.name}")
+    elif result == "skipped_recent":
+        stats.skipped_recent += 1
+        ui.add_result(f"skipped {video_path.name} (checked recently)")
+    elif result == "not_found":
+        stats.not_found += 1
+        ui.add_result(f"not found {video_path.name}")
+    else:
+        stats.failed += 1
+        ui.add_result(f"failed {video_path.name}")
+
+
 def main(argv: list[str] | None = None) -> int:
     try:
         args = parse_args(argv)
@@ -1190,61 +1287,86 @@ def main(argv: list[str] | None = None) -> int:
 
     stats = RunStats()
     interrupted = False
+    jobs = runtime["jobs"]
+    rate = RateLimiter(runtime["min_request_interval"])
+
+    def work(video_path: Path) -> tuple[str, Language | None, str | None]:
+        # Worker body: network-only. It touches the (lock-protected) ledger but
+        # never the UI/stats — those are mutated solely on the main thread.
+        rate.wait()
+        return fetch_subtitle_for_video(
+            video_path=video_path,
+            languages=languages,
+            providers=providers,
+            provider_configs=provider_configs,
+            encoding=runtime["encoding"],
+            detailed_progress=runtime["detailed_progress"],
+            ledger=ledger,
+            progress_cb=None,
+        )
+
     ui.start("Warming up subtitle engines...", stats, detail_text="starting up")
     try:
-        for video_path in iter_video_files(root):
-            current_line = f"Scanning {video_path.name}..."
-            ui.update(current_line, stats, detail_text="queued")
+        if jobs <= 1:
+            for video_path in iter_video_files(root):
+                current_line = f"Scanning {video_path.name}..."
+                ui.update(current_line, stats, detail_text="queued")
 
-            # Bind current_line via default arg so the closure captures this
-            # iteration's value (set_detail is only ever called synchronously
-            # within the loop body below).
-            def set_detail(detail: str, _line: str = current_line) -> None:
-                ui.update(_line, stats, detail_text=detail)
+                # Bind current_line via default arg so the closure captures
+                # this iteration's value (called synchronously below).
+                def set_detail(detail: str, _line: str = current_line) -> None:
+                    ui.update(_line, stats, detail_text=detail)
 
-            stats.scanned += 1
-            result, downloaded_language, provider_name = fetch_subtitle_for_video(
-                video_path=video_path,
-                languages=languages,
-                providers=providers,
-                provider_configs=provider_configs,
-                encoding=runtime["encoding"],
-                detailed_progress=runtime["detailed_progress"],
-                ledger=ledger,
-                progress_cb=set_detail,
-            )
-
-            # Persist progress periodically so an abort or crash mid-run keeps
-            # most of the work already done.
-            if stats.scanned % 25 == 0:
-                ledger.save()
-
-            if result == "downloaded":
-                stats.downloaded += 1
-                if provider_name is not None:
-                    stats.provider_downloads[provider_name] += 1
-                    ui.add_result(
-                        f"downloaded {video_path.name} ({downloaded_language}) from {provider_name}"
-                    )
-                else:
-                    ui.add_result(f"downloaded {video_path.name} ({downloaded_language})")
-                ui.update(current_line, stats, detail_text="completed: downloaded")
-            elif result == "exists":
-                stats.skipped_existing += 1
-                ui.add_result(f"skipped {video_path.name}")
-                ui.update(current_line, stats, detail_text="completed: skipped")
-            elif result == "skipped_recent":
-                stats.skipped_recent += 1
-                ui.add_result(f"skipped {video_path.name} (checked recently)")
-                ui.update(current_line, stats, detail_text="completed: skipped (recent)")
-            elif result == "not_found":
-                stats.not_found += 1
-                ui.add_result(f"not found {video_path.name}")
-                ui.update(current_line, stats, detail_text="completed: not found")
-            else:
-                stats.failed += 1
-                ui.add_result(f"failed {video_path.name}")
-                ui.update(current_line, stats, detail_text="completed: failed")
+                stats.scanned += 1
+                result, downloaded_language, provider_name = fetch_subtitle_for_video(
+                    video_path=video_path,
+                    languages=languages,
+                    providers=providers,
+                    provider_configs=provider_configs,
+                    encoding=runtime["encoding"],
+                    detailed_progress=runtime["detailed_progress"],
+                    ledger=ledger,
+                    progress_cb=set_detail,
+                )
+                _apply_result(ui, stats, video_path, result, downloaded_language, provider_name)
+                ui.update(current_line, stats, detail_text=f"completed: {result}")
+                if stats.scanned % 25 == 0:
+                    ledger.save()
+        else:
+            # Concurrent: a bounded pool of workers, results folded in on the
+            # main thread as they complete. Bound submission to ~2x jobs ahead
+            # since iter_video_files is a generator over a possibly-huge tree.
+            videos = iter(iter_video_files(root))
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=jobs)
+            futures: dict[concurrent.futures.Future, Path] = {}
+            try:
+                for video_path in itertools.islice(videos, jobs * 2):
+                    futures[executor.submit(work, video_path)] = video_path
+                while futures:
+                    done, _ = concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_COMPLETED)
+                    for fut in done:
+                        finished_path = futures.pop(fut)
+                        stats.scanned += 1
+                        try:
+                            result, downloaded_language, provider_name = fut.result()
+                        except Exception:
+                            logging.exception("Worker failed for %s", finished_path.name)
+                            result, downloaded_language, provider_name = ("failed", None, None)
+                        _apply_result(ui, stats, finished_path, result, downloaded_language, provider_name)
+                        ui.update(
+                            f"Scanning ({stats.scanned} done, {jobs} workers)...",
+                            stats,
+                            detail_text=finished_path.name,
+                        )
+                        if stats.scanned % 25 == 0:
+                            ledger.save()
+                        next_path = next(videos, None)
+                        if next_path is not None:
+                            futures[executor.submit(work, next_path)] = next_path
+            finally:
+                # cancel_futures cancels queued-but-unstarted work; in-flight
+                # searches (<= jobs) are allowed to finish.
+                executor.shutdown(wait=True, cancel_futures=True)
     except KeyboardInterrupt:
         interrupted = True
         ui.update("Interrupted by user. Cleaning up...", stats, detail_text="cancelled by user")
