@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import dbm
+import functools
 import json
 import logging
 import os
@@ -20,7 +21,14 @@ from typing import Any
 import yaml
 from babelfish import Language
 from requests.exceptions import RequestException
-from subliminal import VIDEO_EXTENSIONS, download_best_subtitles, region, save_subtitles, scan_video
+from subliminal import (
+    VIDEO_EXTENSIONS,
+    download_best_subtitles,
+    refine,
+    region,
+    save_subtitles,
+    scan_video,
+)
 from subliminal.exceptions import GuessingError, ProviderError
 
 try:
@@ -34,13 +42,21 @@ try:
 except ImportError:  # pragma: no cover - fallback for environments without rich
     HAS_RICH = False
 
+# Public providers tried when the user has not restricted the set. podnapisi was
+# dropped because its host no longer resolves. subtitulamos/subtis are
+# Spanish-only and are kept reachable via -p, but language-aware ordering
+# deprioritises (or drops) providers that do not serve the requested language.
 DEFAULT_PROVIDERS = [
-    "podnapisi",
+    "gestdown",
     "tvsubtitles",
     "subtitulamos",
-    "gestdown",
     "subtis",
 ]
+
+# Refiners run locally after scanning to enrich a video before searching.
+# "hash" computes the file hash used for release-accurate matches (the single
+# biggest lever for hit rate); "metadata" reads embedded stream info via enzyme.
+DEFAULT_REFINERS = ("hash", "metadata")
 
 DEFAULT_CONFIG_FILES = [
     "srt-downloader.yaml",
@@ -429,6 +445,83 @@ def resolve_providers(
             add_provider(provider)
 
     return effective
+
+
+@functools.lru_cache(maxsize=1)
+def _provider_language_map() -> dict[str, frozenset[str]]:
+    """Map provider name -> set of alpha2 language codes it advertises.
+
+    Read best-effort from each provider class's ``languages`` attribute via the
+    subliminal entry points. Providers that fail to load are simply omitted,
+    which makes ordering fail-open (an unknown provider is never dropped).
+    """
+    result: dict[str, frozenset[str]] = {}
+    try:
+        from importlib.metadata import entry_points
+
+        eps = entry_points(group="subliminal.providers")
+    except Exception:  # pragma: no cover - defensive
+        return result
+    for ep in eps:
+        try:
+            provider_cls = ep.load()
+            langs = getattr(provider_cls, "languages", None) or ()
+            codes = set()
+            for lang in langs:
+                code = getattr(lang, "alpha2", None) or str(lang)
+                if code:
+                    codes.add(code.lower())
+            if codes:
+                result[ep.name] = frozenset(codes)
+        except Exception:  # pragma: no cover - a provider failing to import is non-fatal
+            continue
+    return result
+
+
+def order_providers_for_language(
+    providers: list[str],
+    language_code: str,
+    language_map: dict[str, frozenset[str]] | None = None,
+    drop_unsupported: bool = True,
+) -> list[str]:
+    """Order providers so those that serve ``language_code`` come first.
+
+    Providers whose language set is known and does NOT include the language are
+    dropped when ``drop_unsupported`` is set; providers with an unknown language
+    set are always kept (fail-open) so an incomplete map never hides a provider.
+    Original order is otherwise preserved (stable).
+    """
+    language_map = _provider_language_map() if language_map is None else language_map
+    code = language_code.lower()
+    supported: list[str] = []
+    unknown: list[str] = []
+    unsupported: list[str] = []
+    for provider in providers:
+        langs = language_map.get(provider)
+        if langs is None:
+            unknown.append(provider)
+        elif code in langs:
+            supported.append(provider)
+        else:
+            unsupported.append(provider)
+    ordered = supported + unknown
+    if not drop_unsupported:
+        ordered += unsupported
+    # Never return an empty list just because the map was confident-but-wrong:
+    # fall back to the original providers if language-gating removed everything.
+    return ordered or providers
+
+
+def coverage_hint(stats: RunStats, provider_configs: dict[str, dict[str, str]]) -> str | None:
+    """Suggest configuring OpenSubtitles.com when results were thin."""
+    found_any_credentials = any(name in provider_configs for name in ("opensubtitlescom", "opensubtitles"))
+    if stats.not_found > 0 and not found_any_credentials:
+        return (
+            f"{stats.not_found} not found. For better coverage (especially non-English), "
+            "create a free OpenSubtitles.com account and set OPENSUBTITLESCOM_USERNAME / "
+            "OPENSUBTITLESCOM_PASSWORD, then add -p opensubtitlescom."
+        )
+    return None
 
 
 def print_provider_report(
@@ -948,6 +1041,14 @@ def fetch_subtitle_for_video(
         logging.debug("Unexpected exception details: %s", exc)
         return ("failed", None, None)
 
+    # Enrich the video with a file hash (and embedded metadata) so providers can
+    # return release-accurate matches. Best-effort: a refiner failure must not
+    # stop the search.
+    try:
+        refine(video, refiners=DEFAULT_REFINERS)
+    except Exception as exc:  # pragma: no cover - refinement is advisory
+        logging.debug("Refinement failed for %s: %s", video_path.name, exc)
+
     keyword_video = build_keyword_query_video(video)
     had_errors = False
     searched_any = False
@@ -972,10 +1073,14 @@ def fetch_subtitle_for_video(
         searched_any = True
         language_failed = False
 
+        # Prefer providers that actually serve this language (drops e.g. the
+        # Spanish-only providers for a Swedish search).
+        language_providers = order_providers_for_language(providers, language_code)
+
         status, provider_name = try_download_for_language(
             video,
             language,
-            providers,
+            language_providers,
             provider_configs,
             encoding,
             detailed_progress,
@@ -993,7 +1098,7 @@ def fetch_subtitle_for_video(
             status, provider_name = try_download_for_language(
                 keyword_video,
                 language,
-                providers,
+                language_providers,
                 provider_configs,
                 encoding,
                 detailed_progress,
@@ -1150,6 +1255,10 @@ def main(argv: list[str] | None = None) -> int:
 
     print()
     ui.print_summary(stats, interrupted)
+
+    hint = coverage_hint(stats, provider_configs)
+    if hint is not None:
+        print(f"\nTip: {hint}")
 
     if interrupted:
         return 130
