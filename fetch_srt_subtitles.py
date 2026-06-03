@@ -3,24 +3,25 @@
 from __future__ import annotations
 
 import argparse
-from collections import Counter, deque
 import dbm
-from importlib import metadata as importlib_metadata
 import json
 import logging
 import os
 import sys
 import tempfile
 import time
+from collections import Counter, deque
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
+from importlib import metadata as importlib_metadata
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any
 
 import yaml
 from babelfish import Language
+from requests.exceptions import RequestException
 from subliminal import VIDEO_EXTENSIONS, download_best_subtitles, region, save_subtitles, scan_video
 from subliminal.exceptions import GuessingError, ProviderError
-from requests.exceptions import RequestException
 
 try:
     from rich.console import Console, Group
@@ -45,6 +46,7 @@ DEFAULT_CONFIG_FILES = [
     "srt-downloader.yaml",
     ".srt-downloader.yaml",
 ]
+
 
 def _resolve_app_version() -> str:
     try:
@@ -72,7 +74,7 @@ class StatusUI:
     def __init__(self, enabled: bool = True) -> None:
         self.enabled = bool(enabled and HAS_RICH)
         self.console = Console() if self.enabled else None
-        self.live = None
+        self.live: Live | None = None
         self.recent_results: deque[str] = deque(maxlen=8)
 
     def print_splash(self, root: Path, languages: list[Language], providers: list[str]) -> None:
@@ -126,8 +128,7 @@ class StatusUI:
 
         if stats.provider_downloads:
             provider_parts = [
-                f"{provider}: {count}"
-                for provider, count in stats.provider_downloads.most_common()
+                f"{provider}: {count}" for provider, count in stats.provider_downloads.most_common()
             ]
             summary_lines.append(f"Downloaded by provider: {', '.join(provider_parts)}")
 
@@ -255,10 +256,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=float,
         default=None,
         metavar="DAYS",
-        help=(
-            "How many days before a previously not-found video is searched again. "
-            "Default: 14."
-        ),
+        help=("How many days before a previously not-found video is searched again. Default: 14."),
     )
     parser.add_argument(
         "--list-providers",
@@ -343,9 +341,7 @@ def load_config(config_arg: str | None) -> tuple[dict[str, Any], Path | None]:
                     "Config key 'providers' must be a mapping of provider names to provider settings."
                 )
             provider_credentials[provider_name] = {
-                str(key): str(value)
-                for key, value in credentials.items()
-                if value is not None
+                str(key): str(value) for key, value in credentials.items() if value is not None
             }
     elif isinstance(raw_providers, list):
         legacy_selected_providers = normalize_string_list(raw_providers, "providers")
@@ -397,8 +393,8 @@ def resolve_runtime_options(args: argparse.Namespace, config: dict[str, Any]) ->
 def _coerce_positive_float(value: Any, key_name: str) -> float:
     try:
         result = float(value)
-    except (TypeError, ValueError):
-        raise ValueError(f"Config key '{key_name}' must be a number.")
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Config key '{key_name}' must be a number.") from exc
     if result < 0:
         raise ValueError(f"Config key '{key_name}' must not be negative.")
     return result
@@ -456,10 +452,7 @@ def print_provider_report(
         "Credentialed providers from config or environment: "
         f"{', '.join(credentialed) if credentialed else '(none)'}"
     )
-    print(
-        "Public fallback providers: "
-        f"{', '.join(public_fallback) if public_fallback else '(disabled)'}"
-    )
+    print(f"Public fallback providers: {', '.join(public_fallback) if public_fallback else '(disabled)'}")
     print(f"Effective provider order: {', '.join(providers) if providers else '(none)'}")
 
 
@@ -875,9 +868,7 @@ def try_download_for_language(
 
     for index, provider in enumerate(providers, start=1):
         if progress_cb is not None:
-            progress_cb(
-                f"searching {language} via {provider} ({index}/{len(providers)}) ({query_label})"
-            )
+            progress_cb(f"searching {language} via {provider} ({index}/{len(providers)}) ({query_label})")
 
         try:
             subtitles = download_best_subtitles(
@@ -944,7 +935,7 @@ def fetch_subtitle_for_video(
     provider_configs: dict[str, dict[str, str]],
     encoding: str,
     detailed_progress: bool,
-    ledger: "ProgressLedger | None" = None,
+    ledger: ProgressLedger | None = None,
     progress_cb: Callable[[str], None] | None = None,
 ) -> tuple[str, Language | None, str | None]:
     try:
@@ -1100,8 +1091,11 @@ def main(argv: list[str] | None = None) -> int:
             current_line = f"Scanning {video_path.name}..."
             ui.update(current_line, stats, detail_text="queued")
 
-            def set_detail(detail: str) -> None:
-                ui.update(current_line, stats, detail_text=detail)
+            # Bind current_line via default arg so the closure captures this
+            # iteration's value (set_detail is only ever called synchronously
+            # within the loop body below).
+            def set_detail(detail: str, _line: str = current_line) -> None:
+                ui.update(_line, stats, detail_text=detail)
 
             stats.scanned += 1
             result, downloaded_language, provider_name = fetch_subtitle_for_video(
