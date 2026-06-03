@@ -10,6 +10,8 @@ import itertools
 import json
 import logging
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -86,6 +88,7 @@ class RunStats:
     skipped_recent: int = 0
     not_found: int = 0
     failed: int = 0
+    synced: int = 0
     provider_downloads: Counter[str] = field(default_factory=Counter)
 
 
@@ -144,6 +147,8 @@ class StatusUI:
             f"Not found: {stats.not_found}",
             f"Failed: {stats.failed}",
         ]
+        if stats.synced:
+            summary_lines.append(f"Synced: {stats.synced}")
 
         if stats.provider_downloads:
             provider_parts = [
@@ -299,6 +304,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--sync",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "After downloading, automatically correct subtitle timing against the "
+            "video using ffsubsync (requires ffsubsync and ffmpeg on PATH)."
+        ),
+    )
+    parser.add_argument(
         "--list-providers",
         action="store_true",
         help="Print provider selection details and exit.",
@@ -431,6 +445,7 @@ def resolve_runtime_options(args: argparse.Namespace, config: dict[str, Any]) ->
             first_defined(args.min_request_interval, config.get("min_request_interval"), 0.0),
             "min_request_interval",
         ),
+        "sync": bool(first_defined(args.sync, config.get("sync"), False)),
     }
     return runtime
 
@@ -1196,6 +1211,84 @@ def fetch_subtitle_for_video(
     return ("not_found", None, None)
 
 
+def sync_tools_available() -> bool:
+    """True when both ffsubsync and ffmpeg are on PATH."""
+    return bool(shutil.which("ffsubsync") and shutil.which("ffmpeg"))
+
+
+def sync_subtitle(video_path: Path, subtitle_path: Path) -> bool:
+    """Align ``subtitle_path`` to ``video_path`` with ffsubsync, in place.
+
+    Writes to a temp file and replaces the original only on success, so a failed
+    or interrupted sync never corrupts the downloaded subtitle. Returns True on
+    a successful re-sync.
+    """
+    tmp = subtitle_path.with_name(subtitle_path.name + ".synced.tmp")
+    try:
+        proc = subprocess.run(
+            ["ffsubsync", str(video_path), "-i", str(subtitle_path), "-o", str(tmp)],
+            capture_output=True,
+            timeout=900,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        logging.warning("Subtitle sync failed for %s: %s", subtitle_path.name, exc)
+        return False
+    if proc.returncode == 0 and tmp.exists():
+        try:
+            os.replace(tmp, subtitle_path)
+            return True
+        except OSError as exc:
+            logging.warning("Could not replace subtitle after sync for %s: %s", subtitle_path.name, exc)
+    else:
+        logging.warning("ffsubsync exited %s for %s", proc.returncode, subtitle_path.name)
+    try:
+        tmp.unlink()
+    except OSError:
+        pass
+    return False
+
+
+def _subtitle_path_for(video_path: Path, language: Language) -> Path:
+    return video_path.parent / f"{video_path.stem}.{_language_code(language)}.srt"
+
+
+def process_video(
+    video_path: Path,
+    *,
+    languages: list[Language],
+    providers: list[str],
+    provider_configs: dict[str, dict[str, str]],
+    encoding: str,
+    detailed_progress: bool,
+    ledger: ProgressLedger | None,
+    sync: bool,
+    progress_cb: Callable[[str], None] | None = None,
+) -> tuple[str, Language | None, str | None, bool]:
+    """Fetch a subtitle and, when enabled, sync it. Runs in a worker thread.
+
+    Returns ``(status, language, provider, synced)``; never touches the UI or
+    run stats (the main thread owns those).
+    """
+    result, language, provider = fetch_subtitle_for_video(
+        video_path=video_path,
+        languages=languages,
+        providers=providers,
+        provider_configs=provider_configs,
+        encoding=encoding,
+        detailed_progress=detailed_progress,
+        ledger=ledger,
+        progress_cb=progress_cb,
+    )
+    synced = False
+    if result == "downloaded" and sync and language is not None:
+        subtitle_path = _subtitle_path_for(video_path, language)
+        if subtitle_path.exists():
+            if progress_cb is not None:
+                progress_cb(f"syncing {language}")
+            synced = sync_subtitle(video_path, subtitle_path)
+    return result, language, provider, synced
+
+
 def _apply_result(
     ui: StatusUI,
     stats: RunStats,
@@ -1203,15 +1296,21 @@ def _apply_result(
     result: str,
     downloaded_language: Language | None,
     provider_name: str | None,
+    synced: bool = False,
 ) -> None:
     """Fold a single video's outcome into the run stats and recent-results UI."""
     if result == "downloaded":
         stats.downloaded += 1
+        if synced:
+            stats.synced += 1
+        suffix = " [synced]" if synced else ""
         if provider_name is not None:
             stats.provider_downloads[provider_name] += 1
-            ui.add_result(f"downloaded {video_path.name} ({downloaded_language}) from {provider_name}")
+            ui.add_result(
+                f"downloaded {video_path.name} ({downloaded_language}) from {provider_name}{suffix}"
+            )
         else:
-            ui.add_result(f"downloaded {video_path.name} ({downloaded_language})")
+            ui.add_result(f"downloaded {video_path.name} ({downloaded_language}){suffix}")
     elif result == "exists":
         stats.skipped_existing += 1
         ui.add_result(f"skipped {video_path.name}")
@@ -1290,19 +1389,32 @@ def main(argv: list[str] | None = None) -> int:
     jobs = runtime["jobs"]
     rate = RateLimiter(runtime["min_request_interval"])
 
-    def work(video_path: Path) -> tuple[str, Language | None, str | None]:
-        # Worker body: network-only. It touches the (lock-protected) ledger but
-        # never the UI/stats — those are mutated solely on the main thread.
+    sync_enabled = runtime["sync"]
+    if sync_enabled and not sync_tools_available():
+        print(
+            "--sync requested but ffsubsync and/or ffmpeg were not found on PATH; "
+            "continuing without subtitle sync.",
+            file=sys.stderr,
+        )
+        sync_enabled = False
+
+    def work(
+        video_path: Path,
+        progress_cb: Callable[[str], None] | None = None,
+    ) -> tuple[str, Language | None, str | None, bool]:
+        # Worker body: network + optional sync. Touches the (lock-protected)
+        # ledger but never the UI/stats — those are mutated on the main thread.
         rate.wait()
-        return fetch_subtitle_for_video(
-            video_path=video_path,
+        return process_video(
+            video_path,
             languages=languages,
             providers=providers,
             provider_configs=provider_configs,
             encoding=runtime["encoding"],
             detailed_progress=runtime["detailed_progress"],
             ledger=ledger,
-            progress_cb=None,
+            sync=sync_enabled,
+            progress_cb=progress_cb,
         )
 
     ui.start("Warming up subtitle engines...", stats, detail_text="starting up")
@@ -1318,17 +1430,8 @@ def main(argv: list[str] | None = None) -> int:
                     ui.update(_line, stats, detail_text=detail)
 
                 stats.scanned += 1
-                result, downloaded_language, provider_name = fetch_subtitle_for_video(
-                    video_path=video_path,
-                    languages=languages,
-                    providers=providers,
-                    provider_configs=provider_configs,
-                    encoding=runtime["encoding"],
-                    detailed_progress=runtime["detailed_progress"],
-                    ledger=ledger,
-                    progress_cb=set_detail,
-                )
-                _apply_result(ui, stats, video_path, result, downloaded_language, provider_name)
+                result, downloaded_language, provider_name, synced = work(video_path, progress_cb=set_detail)
+                _apply_result(ui, stats, video_path, result, downloaded_language, provider_name, synced)
                 ui.update(current_line, stats, detail_text=f"completed: {result}")
                 if stats.scanned % 25 == 0:
                     ledger.save()
@@ -1348,11 +1451,24 @@ def main(argv: list[str] | None = None) -> int:
                         finished_path = futures.pop(fut)
                         stats.scanned += 1
                         try:
-                            result, downloaded_language, provider_name = fut.result()
+                            result, downloaded_language, provider_name, synced = fut.result()
                         except Exception:
                             logging.exception("Worker failed for %s", finished_path.name)
-                            result, downloaded_language, provider_name = ("failed", None, None)
-                        _apply_result(ui, stats, finished_path, result, downloaded_language, provider_name)
+                            result, downloaded_language, provider_name, synced = (
+                                "failed",
+                                None,
+                                None,
+                                False,
+                            )
+                        _apply_result(
+                            ui,
+                            stats,
+                            finished_path,
+                            result,
+                            downloaded_language,
+                            provider_name,
+                            synced,
+                        )
                         ui.update(
                             f"Scanning ({stats.scanned} done, {jobs} workers)...",
                             stats,

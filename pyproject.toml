@@ -40,6 +40,9 @@ dev = [
   "mypy>=1.11",
   "types-PyYAML>=6.0",
 ]
+sync = [
+  "ffsubsync>=0.4.25",
+]
 
 [project.scripts]
 srt-download = "fetch_srt_subtitles:main"
